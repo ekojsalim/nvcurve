@@ -58,6 +58,25 @@ from .safety import validate_write, check_negative_freq_warnings
 
 log = logging.getLogger("nvcurve.server")
 
+
+def _open_browser_as_user(url: str) -> None:
+    """Open URL as the original (non-root) user when running under sudo."""
+    import os
+    import subprocess
+    sudo_user = os.environ.get("SUDO_USER")
+    if sudo_user and os.geteuid() == 0:
+        try:
+            subprocess.Popen(
+                ["runuser", "-u", sudo_user, "--", "xdg-open", url],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return
+        except Exception:
+            pass
+    import webbrowser
+    webbrowser.open(url)
+
 # ── Shared app state ──────────────────────────────────────────────────────────
 
 _state: dict[str, Any] = {
@@ -205,12 +224,18 @@ app.add_middleware(
 # ── Request models ────────────────────────────────────────────────────────────
 
 class WriteRequest(BaseModel):
-    deltas: dict[int, int]      # {point_index: delta_kHz}
+    deltas: dict[int, int]          # {point_index: delta_kHz}
     force_idle: bool = False
+    max_delta_khz: int | None = None  # per-request safety limit override
 
 
 class GlobalOffsetRequest(BaseModel):
     delta_khz: int
+    max_delta_khz: int | None = None  # per-request safety limit override
+
+
+class VerifyRequest(BaseModel):
+    deltas: dict[int, int]          # {point_index: delta_kHz} — pre-expanded by CLI
 
 
 class SnapshotRestoreRequest(BaseModel):
@@ -590,7 +615,8 @@ async def api_curve_write(req: WriteRequest):
     gpu = _require_gpu()
     cfg: Config = _state["config"]
 
-    errors = validate_write(req.deltas, cfg.max_delta_khz, allow_idle=req.force_idle)
+    effective_limit = req.max_delta_khz if req.max_delta_khz is not None else cfg.max_delta_khz
+    errors = validate_write(req.deltas, effective_limit, allow_idle=req.force_idle)
     if errors:
         raise HTTPException(status_code=400, detail={"errors": errors})
 
@@ -640,7 +666,8 @@ async def api_curve_write_global(req: GlobalOffsetRequest):
     cfg: Config = _state["config"]
 
     all_deltas = {i: req.delta_khz for i in range(CT_POINTS) if i != IDLE_POINT}
-    errors = validate_write(all_deltas, cfg.max_delta_khz)
+    effective_limit = req.max_delta_khz if req.max_delta_khz is not None else cfg.max_delta_khz
+    errors = validate_write(all_deltas, effective_limit)
     if errors:
         raise HTTPException(status_code=400, detail={"errors": errors})
 
@@ -710,6 +737,84 @@ async def api_curve_reset():
     if warning:
         result["warning"] = warning
     return result
+
+
+@app.post("/api/curve/verify")
+async def api_curve_verify(req: VerifyRequest):
+    """Write-verify-read cycle. Returns per-point match results and collateral changes."""
+    from .nvapi.constants import CT_POINTS
+    gpu = _require_gpu()
+    cfg: Config = _state["config"]
+
+    errors = validate_write(req.deltas, cfg.max_delta_khz)
+    if errors:
+        raise HTTPException(status_code=400, detail={"errors": errors})
+
+    before_offsets, err = await _run(read_clock_offsets, gpu)
+    if before_offsets is None:
+        raise HTTPException(status_code=500, detail=f"Failed to read current state: {err}")
+
+    # Always snapshot before verify — it's a testing operation
+    await _run(snapshot_save, gpu, _state["gpu_name"], cfg.snapshot_dir)
+
+    async with _state["write_lock"]:
+        ret, desc = await _run(write_offsets, gpu, req.deltas)
+        if ret != 0:
+            raise HTTPException(status_code=500, detail=f"Write failed ({ret}): {desc}")
+
+        await asyncio.sleep(0.2)
+
+        after_offsets, err = await _run(read_clock_offsets, gpu)
+        if after_offsets is None:
+            raise HTTPException(status_code=500, detail=f"Verification read failed: {err}")
+
+        _state["last_offsets"] = after_offsets
+        _state["active_profile"] = None
+
+        if _state["curve_clients"]:
+            state, _ = await _run(read_curve, gpu, _state["gpu_name"])
+            if state:
+                await _broadcast(_state["curve_clients"], _curve_state_dict(state))
+
+    points_result = []
+    all_matched = True
+    for point, expected in sorted(req.deltas.items()):
+        actual = after_offsets[point]
+        match = actual == expected
+        if not match:
+            all_matched = False
+        points_result.append({
+            "point": point,
+            "expected_khz": expected,
+            "actual_khz": actual,
+            "match": match,
+        })
+
+    collateral = [
+        {"point": i, "before_khz": before_offsets[i], "after_khz": after_offsets[i]}
+        for i in range(CT_POINTS)
+        if i not in req.deltas and before_offsets[i] != after_offsets[i]
+    ]
+
+    return {
+        "ok": all_matched and not collateral,
+        "all_matched": all_matched,
+        "no_side_effects": not collateral,
+        "return_code": ret,
+        "description": desc,
+        "points": points_result,
+        "collateral_changes": collateral,
+    }
+
+
+@app.post("/api/shutdown")
+async def api_shutdown():
+    """Gracefully shut down the server process."""
+    import os
+    import signal
+    loop = asyncio.get_event_loop()
+    loop.call_later(0.1, lambda: os.kill(os.getpid(), signal.SIGTERM))
+    return {"ok": True}
 
 
 @app.post("/api/snapshot/save")
@@ -875,20 +980,17 @@ def run(
     # logging them at ERROR level creates false alarm noise.
     logging.getLogger("websockets").setLevel(logging.CRITICAL)
 
-    # Port fallback: find first available port starting from the requested one.
-    final_port = port
-    for i in range(10):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            try:
-                s.bind((host, final_port))
-                break
-            except socket.error:
-                if i == 9:
-                    print(f"Error: No available port found in range {port}–{port + 9}.")
-                    return
-                final_port += 1
+    # Fail fast if the port is already in use — silently shifting ports breaks
+    # client discovery. Users should configure a different port explicitly.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind((host, port))
+        except OSError:
+            print(f"Error: port {port} is already in use.")
+            print(f"Use --port N to specify a different port, or free port {port} first.")
+            return
 
-    url = f"http://{host}:{final_port}"
+    url = f"http://{host}:{port}"
 
     # Print banner *before* uvicorn starts so it appears above uvicorn's own output.
     # GPU name is populated by the lifespan; we omit it here since the server
@@ -901,7 +1003,6 @@ def run(
     print()
 
     if open_browser and not _DEV_PORT:
-        import webbrowser
-        threading.Timer(1.2, lambda: webbrowser.open(url)).start()
+        threading.Timer(1.2, lambda: _open_browser_as_user(url)).start()
 
-    uvicorn.run(app, host=host, port=final_port, log_level="warning", access_log=False)
+    uvicorn.run(app, host=host, port=port, log_level="warning", access_log=False)

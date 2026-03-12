@@ -62,10 +62,10 @@ nvcurve read
 Run a write-and-verify cycle with a small, safe offset to confirm the write path works end-to-end:
 
 ```bash
-nvcurve verify --point 80 --delta 15
+nvcurve verify --point 80 --delta 5
 ```
 
-This writes `+15 MHz` to point 80, reads it back, and confirms whether the driver accepted the change, including whether any other points were unexpectedly modified. Restore your baseline afterwards:
+This writes `+5 MHz` to point 80, reads it back, and confirms whether the driver accepted the change, including whether any other points were unexpectedly modified. Restore your baseline afterwards:
 
 ```bash
 nvcurve snapshot restore
@@ -91,6 +91,36 @@ To run the server in the background:
 nvcurve serve start --detach
 nvcurve serve status
 nvcurve serve stop
+```
+
+### Step 3 — (Optional) Install as a systemd service
+
+If you want the server to start automatically on boot, register it as a systemd service:
+
+```bash
+nvcurve service install
+```
+
+This enables and starts the service immediately. Manage it with:
+
+```bash
+nvcurve service start
+nvcurve service stop
+nvcurve service restart
+nvcurve service status
+nvcurve service uninstall
+```
+
+## Upgrading
+
+```bash
+uv tool upgrade nvcurve
+```
+
+If you are running nvcurve as a systemd service, restart it afterwards to pick up the new version:
+
+```bash
+nvcurve service restart
 ```
 
 ## Web UI controls
