@@ -105,7 +105,6 @@ def _vfpoint_dict(p) -> dict:
         "delta_mhz": p.delta_mhz,
         "effective_freq_khz": p.effective_freq_khz,
         "effective_freq_mhz": p.effective_freq_mhz,
-        "is_idle": p.is_idle,
     }
 
 
@@ -225,7 +224,6 @@ app.add_middleware(
 
 class WriteRequest(BaseModel):
     deltas: dict[int, int]          # {point_index: delta_kHz}
-    force_idle: bool = False
     max_delta_khz: int | None = None  # per-request safety limit override
 
 
@@ -615,16 +613,17 @@ async def api_curve_write(req: WriteRequest):
     gpu = _require_gpu()
     cfg: Config = _state["config"]
 
+    vfp_state, _ = await _run(read_curve, gpu, _state["gpu_name"])
+
     effective_limit = req.max_delta_khz if req.max_delta_khz is not None else cfg.max_delta_khz
-    errors = validate_write(req.deltas, effective_limit, allow_idle=req.force_idle)
+    errors = validate_write(req.deltas, effective_limit)
     if errors:
         raise HTTPException(status_code=400, detail={"errors": errors})
 
     # Check for negative-freq warnings before writing (best-effort, non-blocking)
     freq_warnings: list[str] = []
-    vfp_points, _ = await _run(read_vfp_curve, gpu)
-    if vfp_points:
-        vfp_freqs = [f for f, _v in vfp_points]
+    if vfp_state:
+        vfp_freqs = [p.freq_khz for p in vfp_state.points]
         freq_warnings = check_negative_freq_warnings(
             req.deltas, vfp_freqs, _state["last_offsets"] or []
         )
@@ -660,21 +659,23 @@ async def api_curve_write(req: WriteRequest):
 
 @app.post("/api/curve/write/global")
 async def api_curve_write_global(req: GlobalOffsetRequest):
-    """Apply a uniform frequency offset to all non-idle points."""
-    from .nvapi.constants import CT_POINTS, IDLE_POINT
+    """Apply a uniform frequency offset to all curve points."""
     gpu = _require_gpu()
     cfg: Config = _state["config"]
 
-    all_deltas = {i: req.delta_khz for i in range(CT_POINTS) if i != IDLE_POINT}
+    vfp_state, _ = await _run(read_curve, gpu, _state["gpu_name"])
+    if not vfp_state:
+        raise HTTPException(status_code=500, detail="Failed to read curve")
+
+    all_deltas = {p.index: req.delta_khz for p in vfp_state.points}
     effective_limit = req.max_delta_khz if req.max_delta_khz is not None else cfg.max_delta_khz
     errors = validate_write(all_deltas, effective_limit)
     if errors:
         raise HTTPException(status_code=400, detail={"errors": errors})
 
     freq_warnings: list[str] = []
-    vfp_points, _ = await _run(read_vfp_curve, gpu)
-    if vfp_points:
-        vfp_freqs = [f for f, _v in vfp_points]
+    if vfp_state:
+        vfp_freqs = [p.freq_khz for p in vfp_state.points]
         freq_warnings = check_negative_freq_warnings(
             all_deltas, vfp_freqs, _state["last_offsets"] or []
         )
@@ -742,7 +743,6 @@ async def api_curve_reset():
 @app.post("/api/curve/verify")
 async def api_curve_verify(req: VerifyRequest):
     """Write-verify-read cycle. Returns per-point match results and collateral changes."""
-    from .nvapi.constants import CT_POINTS
     gpu = _require_gpu()
     cfg: Config = _state["config"]
 
@@ -792,7 +792,7 @@ async def api_curve_verify(req: VerifyRequest):
 
     collateral = [
         {"point": i, "before_khz": before_offsets[i], "after_khz": after_offsets[i]}
-        for i in range(CT_POINTS)
+        for i in range(len(before_offsets))
         if i not in req.deltas and before_offsets[i] != after_offsets[i]
     ]
 

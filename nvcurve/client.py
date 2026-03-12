@@ -85,10 +85,9 @@ class NvCurveClient:
     def write_curve(
         self,
         deltas: dict[int, int],
-        force_idle: bool = False,
         max_delta_khz: int | None = None,
     ) -> dict:
-        body: dict = {"deltas": deltas, "force_idle": force_idle}
+        body: dict = {"deltas": deltas}
         if max_delta_khz is not None:
             body["max_delta_khz"] = max_delta_khz
         return self._post("/api/curve/write", body)

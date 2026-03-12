@@ -5,7 +5,7 @@ import type { VFPoint, CurveState } from '../../types';
 import { CurveTooltip } from './CurveTooltip';
 import { CurveToolbar } from './CurveToolbar';
 import { ConfirmDialog } from '../common/ConfirmDialog';
-import { activePoints, voltExtent, refBaseMhz, detectClampedPoints } from '../../utils/curveHelpers';
+import { voltExtent, refBaseMhz, detectClampedPoints } from '../../utils/curveHelpers';
 import { useCurveStore } from '../../store/curveStore';
 
 interface Props {
@@ -88,8 +88,7 @@ export function CurveEditor({ curve, currentVoltageMv, currentClockMhz, onRefres
     }
   }
 
-  const pts = activePoints(curve.points);
-  const activePts = pts;
+  const pts = curve.points;
   const clampedPoints = useMemo(() => detectClampedPoints(curve.points), [curve.points]);
 
   // ─── X-axis zoom / viewport ──────────────────────────────────────────────
@@ -196,7 +195,6 @@ export function CurveEditor({ curve, currentVoltageMv, currentClockMhz, onRefres
   // ─── Point mousedown → start drag ────────────────────────────────────────
   function handlePointMouseDown(e: React.MouseEvent, p: VFPoint) {
     containerRef.current?.focus();
-    if (p.is_idle) return;
     e.stopPropagation();
     e.preventDefault();
 
@@ -213,7 +211,7 @@ export function CurveEditor({ curve, currentVoltageMv, currentClockMhz, onRefres
       // Feature: Dragging a point in a multi-selection moves the whole selection
       for (const index of selectedPoints) {
         const pt = pts.find(x => x.index === index);
-        if (pt && !pt.is_idle) {
+        if (pt) {
           initialDeltas.set(index, pendingDeltas.has(index) ? pendingDeltas.get(index)! : pt.delta_khz);
         }
       }
@@ -405,7 +403,6 @@ export function CurveEditor({ curve, currentVoltageMv, currentClockMhz, onRefres
             const { xScale: sx, yScale: ys } = scalesRef.current;
             const selected = pts
               .filter((p) => {
-                if (p.is_idle) return false;
                 const cx = sx(p.volt_mv);
                 const cy = ys(effectiveMhz(p));
                 return cx >= minX && cx <= maxX && cy >= minY && cy <= maxY;
@@ -506,7 +503,7 @@ export function CurveEditor({ curve, currentVoltageMv, currentClockMhz, onRefres
       <div className="px-3 pt-3">
         <CurveToolbar
           onRefresh={onRefresh}
-          activePts={activePts}
+          activePts={pts}
           onResetZoom={() => setXViewport(voltExtent(pts))}
           isZoomed={Math.abs((xViewport[1] - xViewport[0]) - (voltExtent(pts)[1] - voltExtent(pts)[0])) > 5}
         />
@@ -525,7 +522,7 @@ export function CurveEditor({ curve, currentVoltageMv, currentClockMhz, onRefres
 
           if (e.key === 'a' && (e.ctrlKey || e.metaKey)) {
             e.preventDefault();
-            selectRange(activePts.map(p => p.index));
+            selectRange(pts.map(p => p.index));
             return;
           }
 
@@ -537,18 +534,18 @@ export function CurveEditor({ curve, currentVoltageMv, currentClockMhz, onRefres
 
           if (e.key === 'Tab') {
             e.preventDefault();
-            if (activePts.length === 0) return;
+            if (pts.length === 0) return;
             const currentSelected = Array.from(selectedPoints);
             if (currentSelected.length === 0) {
-              selectPoint(activePts[0].index);
+              selectPoint(pts[0].index);
             } else {
               const lastSelected = e.shiftKey ? Math.min(...currentSelected) : Math.max(...currentSelected);
-              const idx = activePts.findIndex(p => p.index === lastSelected);
+              const idx = pts.findIndex(p => p.index === lastSelected);
               if (idx >= 0) {
                 let nextIdx = e.shiftKey ? idx - 1 : idx + 1;
-                if (nextIdx < 0) nextIdx = activePts.length - 1;
-                if (nextIdx >= activePts.length) nextIdx = 0;
-                selectPoint(activePts[nextIdx].index);
+                if (nextIdx < 0) nextIdx = pts.length - 1;
+                if (nextIdx >= pts.length) nextIdx = 0;
+                selectPoint(pts[nextIdx].index);
               }
             }
             return;
@@ -564,7 +561,7 @@ export function CurveEditor({ curve, currentVoltageMv, currentClockMhz, onRefres
             const edits = new Map<number, number>();
             for (const idx of selectedPoints) {
               const p = pts.find(pt => pt.index === idx);
-              if (p && !p.is_idle) {
+              if (p) {
                 const current = pendingDeltas.has(idx) ? pendingDeltas.get(idx)! : p.delta_khz;
                 const clamped = Math.max(-500_000, Math.min(500_000, current + changeKhz));
                 edits.set(idx, clamped);
@@ -711,7 +708,6 @@ export function CurveEditor({ curve, currentVoltageMv, currentClockMhz, onRefres
                 const isDragging = dragInfo?.pointIndex === p.index;
 
                 let fill = '#34d399';
-                if (p.is_idle) fill = '#52525b';
                 if (hasPendingEdit && !isSelected) fill = '#22d3ee';
                 if (isSelected) fill = '#22d3ee';
 
@@ -740,12 +736,11 @@ export function CurveEditor({ curve, currentVoltageMv, currentClockMhz, onRefres
                       fill={fill}
                       stroke={isDragging ? '#fff' : isSelected ? '#fff' : isHovered ? '#fff' : 'none'}
                       strokeWidth={isDragging ? 2 : isSelected ? 2 : 1}
-                      style={{ cursor: p.is_idle ? 'default' : 'ns-resize', transition: 'r 0.08s' }}
+                      style={{ cursor: 'ns-resize', transition: 'r 0.08s' }}
                       onMouseEnter={() => handleMouseEnter(p)}
                       onMouseLeave={handleMouseLeave}
                       onMouseDown={(e) => handlePointMouseDown(e, p)}
                       onClick={(e) => {
-                        if (p.is_idle) return;
                         if (dragMoved.current) return;
                         selectPoint(p.index, e.shiftKey);
                       }}
