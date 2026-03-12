@@ -11,7 +11,7 @@ NVCurve brings MSI Afterburner-style per-point voltage-frequency curve control t
 > [!WARNING]
 > **This tool is experimental.** Verified only on an **RTX 5090** with driver **580.126.18**. Compatibility with other GPUs and driver versions is unknown. The underlying NvAPI functions are undocumented and may change or disappear between driver releases.
 >
-> Read operations are generally safe. Write operations alter GPU frequency offsets at a hardware level. **Follow the first-time setup steps below before applying any changes**, and proceed with caution.
+> Read operations are generally safe. Write operations alter GPU operations. **Follow the first-time setup steps below before applying any changes**, and proceed with caution.
 
 ![NVCurve curve editor](.github/screenshots/curve-editor.png)
 
@@ -21,7 +21,6 @@ NVCurve brings MSI Afterburner-style per-point voltage-frequency curve control t
 - **Live Monitoring**: Tracks GPU voltage, clock speed, temperature, and power draw via NvAPI and NVML.
 - **Profile Management**: Save and load named clock configurations.
 - **Modern Web UI**: Interactive curve graph, point table, and real-time monitoring dashboard — all in the browser.
-- **CLI**: Full terminal interface for scripting, automation, and headless systems.
 
 ## Prerequisites
 
@@ -66,7 +65,7 @@ Run a write-and-verify cycle with a small, safe offset to confirm the write path
 nvcurve verify --point 80 --delta 15
 ```
 
-This writes `+15 MHz` to point 80, reads it back, and confirms whether the driver accepted the change — including whether any other points were unexpectedly modified. Restore your baseline afterwards:
+This writes `+15 MHz` to point 80, reads it back, and confirms whether the driver accepted the change, including whether any other points were unexpectedly modified. Restore your baseline afterwards:
 
 ```bash
 nvcurve snapshot restore
@@ -190,4 +189,4 @@ NVCurve has two components:
 
 ## Disclaimer
 
-This software is provided as-is. The NvAPI functions it relies on are undocumented, unsupported by NVIDIA, and may change or break without notice between driver versions. NVCurve has been verified on a single GPU (RTX 5090) and driver version (580.126.18) — behaviour on other hardware is unknown. Write operations alter GPU state at a hardware level. The authors accept no responsibility for hardware damage, system instability, or data loss resulting from the use of this software.
+This software is provided as-is. The NvAPI functions it relies on are undocumented, unsupported by NVIDIA, and may change or break without notice between driver versions. NVCurve has been verified on a single GPU (RTX 5090) and driver version (580.126.18); behaviour on other hardware is unknown. Write operations alter GPU state at a hardware level. The authors accept no responsibility for hardware damage, system instability, or data loss resulting from the use of this software.
