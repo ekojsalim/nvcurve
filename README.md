@@ -11,7 +11,7 @@ NVCurve brings MSI Afterburner-style per-point voltage-frequency curve control t
 > [!WARNING]
 > **This tool is experimental.** Verified only on an **RTX 5090** with driver **580.126.18**. Compatibility with other GPUs and driver versions is unknown. The underlying NvAPI functions are undocumented and may change or disappear between driver releases.
 >
-> Read operations are generally safe. Write operations alter GPU operations. **Follow the first-time setup steps below before applying any changes**, and proceed with caution.
+> Read operations are generally safe. Write operations alter GPU operational parameters. **Follow the first-time setup steps below before applying any changes**, and proceed with caution.
 
 ![NVCurve curve editor](.github/screenshots/curve-editor.png)
 
@@ -20,7 +20,7 @@ NVCurve brings MSI Afterburner-style per-point voltage-frequency curve control t
 - **Per-Point Curve Editing**: Independently adjust the frequency offset for any voltage point on the GPU's V/F curve.
 - **Live Monitoring**: Tracks GPU voltage, clock speed, temperature, and power draw via NvAPI and NVML.
 - **Profile Management**: Save and load named clock configurations.
-- **Modern Web UI**: Interactive curve graph, point table, and real-time monitoring dashboard — all in the browser.
+- **Modern Web UI**: Interactive curve graph, point table, and real-time monitoring dashboard, all in the browser.
 
 ## Prerequisites
 
@@ -109,7 +109,7 @@ nvcurve serve stop
 | ↑ / ↓ arrow keys | Nudge selected point(s) ±1 MHz |
 | Ctrl/Cmd + ↑ / ↓ | Nudge ±10 MHz |
 | Tab / Shift+Tab | Step through points one by one |
-| Shift+drag on background | Box select — draw a rubber-band rectangle |
+| Shift+drag on background | Box select; draw a rubber-band rectangle |
 | Drag on background | Pan the X axis |
 | Ctrl/Cmd+scroll | Zoom X axis around the cursor |
 
@@ -125,7 +125,7 @@ nvcurve serve stop
 
 ### Toolbar
 
-The **Global Offset** slider appears when all active points share a uniform delta. Dragging it stages that offset across every point simultaneously — equivalent to `nvcurve write --global` but interactive.
+The **Global Offset** slider appears when all active points share a uniform delta. Dragging it stages that offset across every point simultaneously; equivalent to `nvcurve write --global` but interactive.
 
 ## CLI reference
 
@@ -142,7 +142,7 @@ nvcurve read --json            # JSON output
 ### Writing
 
 > [!NOTE]
-> If you use LACT or similar tools, disable them first — concurrent writes will overwrite each other.
+> If you use LACT or similar tools, disable them first. Concurrent writes will overwrite each other.
 
 ```bash
 # Preview first
@@ -189,4 +189,4 @@ NVCurve has two components:
 
 ## Disclaimer
 
-This software is provided as-is. The NvAPI functions it relies on are undocumented, unsupported by NVIDIA, and may change or break without notice between driver versions. NVCurve has been verified on a single GPU (RTX 5090) and driver version (580.126.18); behaviour on other hardware is unknown. Write operations alter GPU state at a hardware level. The authors accept no responsibility for hardware damage, system instability, or data loss resulting from the use of this software.
+This software is provided as-is. The NvAPI functions it relies on are undocumented, unsupported officially by NVIDIA, and may change or break without notice between driver versions. NVCurve has been verified on a single GPU (RTX 5090) and driver version (580.126.18); behaviour on other hardware is unknown. Write operations alter GPU state. The authors accept no responsibility for hardware damage, system instability, or data loss resulting from the use of this software.
