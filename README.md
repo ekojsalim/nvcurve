@@ -1,12 +1,12 @@
 <div align="center">
   <img src="frontend/public/logo.svg" alt="NVCurve Logo" width="128" />
   <h1>NVCurve</h1>
-  <p><strong>A native Linux NVIDIA GPU V/F Curve Editor & Overclocking Tool</strong></p>
+  <p><strong>Linux NVIDIA GPU V/F Curve Editor & OC Tool</strong></p>
 </div>
 
 ---
 
-NVCurve brings MSI Afterburner-style per-point voltage-frequency curve control to Linux. It calls undocumented NvAPI functions directly via `libnvidia-api.so`, giving you precise hardware-level frequency offsets without abstraction-layer overhead. A Python CLI handles scripting and headless use; a React web UI provides interactive curve editing, profile management, and live hardware monitoring.
+NVCurve brings MSI Afterburner-style per-point voltage-frequency curve control to Linux. It calls undocumented NvAPI functions directly via `libnvidia-api.so`, giving you precise frequency offsets control. A Python CLI handles scripting and headless use; a React web UI provides interactive curve editing, profile management, and live hardware monitoring.
 
 > [!WARNING]
 > **This tool is experimental.** Verified only on an **RTX 5090** with driver **580.126.18**. Compatibility with other GPUs and driver versions is unknown. The underlying NvAPI functions are undocumented and may change or disappear between driver releases.
