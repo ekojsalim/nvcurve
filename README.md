@@ -94,6 +94,40 @@ nvcurve serve status
 nvcurve serve stop
 ```
 
+## Web UI controls
+
+### Curve editor
+
+| Action | Result |
+|---|---|
+| Click point | Select (clears other selections) |
+| Shift+click point | Add/remove point from selection |
+| Ctrl/Cmd+A | Select all active points |
+| Escape | Clear selection |
+| Drag point | Stage a frequency offset edit |
+| Drag point (multi-selection) | Moves all selected points together |
+| Enter (single point selected) | Open inline input to type an exact offset |
+| ↑ / ↓ arrow keys | Nudge selected point(s) ±1 MHz |
+| Ctrl/Cmd + ↑ / ↓ | Nudge ±10 MHz |
+| Tab / Shift+Tab | Step through points one by one |
+| Shift+drag on background | Box select — draw a rubber-band rectangle |
+| Drag on background | Pan the X axis |
+| Ctrl/Cmd+scroll | Zoom X axis around the cursor |
+
+### Point table
+
+| Action | Result |
+|---|---|
+| Click row | Select point |
+| Ctrl/Cmd+click | Toggle point in/out of selection |
+| Shift+click | Range select from last selected to clicked |
+| Drag across rows | Range select by dragging |
+| Select Before / Select After | Expand selection to all points before or after the currently selected one (appears when exactly one point is selected) |
+
+### Toolbar
+
+The **Global Offset** slider appears when all active points share a uniform delta. Dragging it stages that offset across every point simultaneously — equivalent to `nvcurve write --global` but interactive.
+
 ## CLI reference
 
 The CLI is suited for scripting, headless systems, or quick one-off operations. All write commands support `--dry-run` to preview changes without applying them.

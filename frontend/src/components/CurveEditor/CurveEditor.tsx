@@ -209,15 +209,7 @@ export function CurveEditor({ curve, currentVoltageMv, currentClockMhz, onRefres
 
     const initialDeltas = new Map<number, number>();
 
-    // Feature: Shift+drag unselected point moves all active points
-    if (e.shiftKey && !selectedPoints.has(p.index)) {
-      // Auto-select all active points so they move together
-      const allActive = activePts.map(pt => pt.index);
-      selectRange(allActive);
-      for (const pt of activePts) {
-        initialDeltas.set(pt.index, pendingDeltas.has(pt.index) ? pendingDeltas.get(pt.index)! : pt.delta_khz);
-      }
-    } else if (selectedPoints.has(p.index) && selectedPoints.size > 1) {
+    if (selectedPoints.has(p.index) && selectedPoints.size > 1) {
       // Feature: Dragging a point in a multi-selection moves the whole selection
       for (const index of selectedPoints) {
         const pt = pts.find(x => x.index === index);
