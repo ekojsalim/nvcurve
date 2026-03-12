@@ -8,7 +8,6 @@ export interface VFPoint {
   delta_mhz: number;
   effective_freq_khz: number;
   effective_freq_mhz: number;
-  is_idle: boolean;
 }
 
 export interface CurveState {

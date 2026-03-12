@@ -5,7 +5,7 @@ import type { VFPoint } from '../../types';
 
 interface Props {
   onRefresh: () => void;
-  /** All non-idle active points — used by global offset slider */
+  /** All curve points — used by global offset slider */
   activePts: VFPoint[];
   /** Called to reset the x-axis zoom to default */
   onResetZoom: () => void;

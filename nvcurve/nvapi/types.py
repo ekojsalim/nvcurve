@@ -13,7 +13,6 @@ class VFPoint:
     freq_khz: int       # Base frequency from VFP curve
     volt_uv: int        # Voltage from VFP curve
     delta_khz: int      # Offset from ClockBoostTable (signed)
-    is_idle: bool = False  # True for point 127
 
     @property
     def effective_freq_khz(self) -> int:

@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect } from 'react';
 import { PointRow } from './PointRow';
 import type { VFPoint } from '../../types';
-import { findCurrentPoint, detectClampedPoints, activePoints } from '../../utils/curveHelpers';
+import { findCurrentPoint, detectClampedPoints } from '../../utils/curveHelpers';
 import { useCurveStore } from '../../store/curveStore';
 
 interface Props {
@@ -13,7 +13,6 @@ export function PointTable({ points, currentVoltageMv }: Props) {
   const { pendingDeltas, selectedPoints, selectPoint, selectRange } = useCurveStore();
   const currentPoint = findCurrentPoint(points, currentVoltageMv);
   const clampedPoints = useMemo(() => detectClampedPoints(points), [points]);
-  const activePts = useMemo(() => activePoints(points), [points]);
 
   const [dragStartIdx, setDragStartIdx] = useState<number | null>(null);
 
@@ -22,8 +21,6 @@ export function PointTable({ points, currentVoltageMv }: Props) {
     window.addEventListener('mouseup', onUp);
     return () => window.removeEventListener('mouseup', onUp);
   }, []);
-
-  const filtered = activePts;
 
   return (
     <div className="bg-zinc-900 rounded-lg overflow-hidden flex flex-col">
@@ -34,13 +31,13 @@ export function PointTable({ points, currentVoltageMv }: Props) {
             {pendingDeltas.size} staged
           </span>
         )}
-        <span className="ml-auto text-xs text-zinc-600">{filtered.length} points</span>
+        <span className="ml-auto text-xs text-zinc-600">{points.length} points</span>
         {selectedPoints.size === 1 && (
           <div className="flex gap-1 ml-4 border-l border-zinc-800 pl-4">
             <button
               onClick={() => {
                 const idx = Array.from(selectedPoints)[0];
-                const beforeIdxs = activePts.filter(p => p.index <= idx).map(p => p.index);
+                const beforeIdxs = points.filter(p => p.index <= idx).map(p => p.index);
                 selectRange(beforeIdxs);
               }}
               className="px-2 py-0.5 rounded text-xs bg-zinc-800 text-zinc-400 hover:bg-zinc-700 transition-colors whitespace-nowrap"
@@ -50,7 +47,7 @@ export function PointTable({ points, currentVoltageMv }: Props) {
             <button
               onClick={() => {
                 const idx = Array.from(selectedPoints)[0];
-                const afterIdxs = activePts.filter(p => p.index >= idx).map(p => p.index);
+                const afterIdxs = points.filter(p => p.index >= idx).map(p => p.index);
                 selectRange(afterIdxs);
               }}
               className="px-2 py-0.5 rounded text-xs bg-zinc-800 text-zinc-400 hover:bg-zinc-700 transition-colors whitespace-nowrap"
@@ -72,7 +69,7 @@ export function PointTable({ points, currentVoltageMv }: Props) {
             </tr>
           </thead>
           <tbody>
-            {filtered.map((p) => (
+            {points.map((p) => (
               <PointRow
                 key={p.index}
                 point={p}
@@ -88,7 +85,7 @@ export function PointTable({ points, currentVoltageMv }: Props) {
                       const last = Math.max(...currentSelected);
                       const min = Math.min(last, p.index);
                       const max = Math.max(last, p.index);
-                      const toSelect = activePts.filter(a => a.index >= min && a.index <= max).map(a => a.index);
+                      const toSelect = points.filter(a => a.index >= min && a.index <= max).map(a => a.index);
                       selectRange(toSelect);
                     } else {
                       selectPoint(p.index, false);
@@ -104,7 +101,7 @@ export function PointTable({ points, currentVoltageMv }: Props) {
                   if (dragStartIdx !== null) {
                     const min = Math.min(dragStartIdx, p.index);
                     const max = Math.max(dragStartIdx, p.index);
-                    const toSelect = activePts.filter(a => a.index >= min && a.index <= max).map(a => a.index);
+                    const toSelect = points.filter(a => a.index >= min && a.index <= max).map(a => a.index);
                     selectRange(toSelect);
                   }
                 }}

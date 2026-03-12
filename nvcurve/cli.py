@@ -72,7 +72,6 @@ def parse_range(s: str):
 
 def print_curve(points, offsets, voltage, full=False):
     """Print formatted V/F curve table."""
-    from .nvapi.constants import VFP_POINTS
     if voltage:
         print(f"Current voltage: {voltage / 1000:.1f} mV")
     print()
@@ -111,19 +110,18 @@ def print_curve(points, offsets, voltage, full=False):
         marker = ""
         if current_idx is not None and i == current_idx:
             marker = "  <-- current"
-        elif i == len(points) - 1 and f < 1_000_000:
-            marker = "  (idle/low-power)"
+        elif f < 1_000_000 and v > 0:
+            marker = "  (low-power)"
         print(f"{i:3d}  {freq_s:>8s}  {volt_s:>8s}  {offset_s:>8s}{marker}")
 
-    active = [(f, v) for i, (f, v) in enumerate(points)
-              if f > 0 and v > 0 and i < len(points) - 1]
+    active = [(f, v) for f, v in points if f > 0 and v > 0]
     if active:
         freqs = [f for f, v in active]
         volts = [v for f, v in active]
         print()
         print(f"Frequency range: {min(freqs)/1000:.0f} – {max(freqs)/1000:.0f} MHz")
         print(f"Voltage range:   {min(volts)/1000:.0f} – {max(volts)/1000:.0f} mV")
-        print(f"Active V/F points: {len(active)} (+ 1 idle)")
+        print(f"V/F points: {len(active)}")
         if offsets:
             nonzero = sum(1 for o in offsets if o != 0)
             if nonzero > 0:
@@ -355,7 +353,7 @@ def cmd_read(args, client: NvCurveClient):
     if args.raw:
         require_root()
         from .hal.gpu import get_gpu
-        from .hal.vfcurve import read_vfp_curve, read_clock_offsets, read_clock_table_raw, fill_mask_128
+        from .hal.vfcurve import read_clock_table_raw, fill_mask_128
         from .hal.monitoring import read_voltage
         from .nvapi.bootstrap import nvcall
         from .nvapi.constants import FUNC
@@ -385,10 +383,12 @@ def cmd_read(args, client: NvCurveClient):
             print(hexdump(ct_raw, 0x44, CT_STRIDE * 5))
         print()
 
-        points, _ = read_vfp_curve(gpu)
-        offsets, _ = read_clock_offsets(gpu)
+        from .hal.vfcurve import read_curve
+        curve_state, _ = read_curve(gpu, gpu_name)
         voltage, _ = read_voltage(gpu)
-        if points:
+        if curve_state:
+            points = [(p.freq_khz, p.volt_uv) for p in curve_state.points]
+            offsets = [p.delta_khz for p in curve_state.points]
             _show_curve(gpu_name, points, offsets, voltage, args)
         return
 
@@ -403,15 +403,16 @@ def cmd_read(args, client: NvCurveClient):
         print("(server not running — reading hardware directly)", file=sys.stderr)
         require_root()
         from .hal.gpu import get_gpu
-        from .hal.vfcurve import read_vfp_curve, read_clock_offsets
+        from .hal.vfcurve import read_curve
         from .hal.monitoring import read_voltage as _read_voltage
         gpu, gpu_name = get_gpu(index=0)
-        points, vfp_err = read_vfp_curve(gpu)
-        offsets, _ = read_clock_offsets(gpu)
-        voltage, _ = _read_voltage(gpu)
-        if not points:
-            print(f"Failed to read V/F curve: {vfp_err}")
+        curve_state, curve_err = read_curve(gpu, gpu_name)
+        if not curve_state:
+            print(f"Failed to read V/F curve: {curve_err}")
             return
+        voltage, _ = _read_voltage(gpu)
+        points = [(p.freq_khz, p.volt_uv) for p in curve_state.points]
+        offsets = [p.delta_khz for p in curve_state.points]
         _show_curve(gpu_name, points, offsets, voltage, args)
         return
 
@@ -536,7 +537,7 @@ def cmd_write(args, client: NvCurveClient):
         else:
             result = client.write_curve(
                 point_deltas,
-                force_idle=args.force_idle,
+
                 max_delta_khz=max_delta_khz,
             )
     except ServerNotRunning:
@@ -992,8 +993,6 @@ Examples:
                          help="Frequency offset in MHz (e.g. 15, -30)")
     p_write.add_argument("--dry-run", action="store_true",
                          help="Preview changes without applying")
-    p_write.add_argument("--force-idle", action="store_true",
-                         help="Allow modifying point 127 (idle)")
     p_write.add_argument("--max-delta", type=float, default=None,
                          help="Override safety limit for this write (MHz)")
 

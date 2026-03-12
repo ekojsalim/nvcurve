@@ -98,7 +98,7 @@ export const useCurveStore = create<CurveStore>()((set, get) => ({
     set((s) => {
       const next = new Map(s.pendingDeltas);
       for (const p of points) {
-        if (!p.is_idle) next.set(p.index, deltaKhz);
+        next.set(p.index, deltaKhz);
       }
       return { pendingDeltas: next };
     }),
@@ -179,7 +179,7 @@ export const useCurveStore = create<CurveStore>()((set, get) => ({
     if (!curve || pendingDeltas.size === 0) return false;
     for (const [index, pendingKhz] of pendingDeltas) {
       const p = curve.points.find((pt) => pt.index === index);
-      if (!p || p.is_idle || p.freq_khz === 0) continue;
+      if (!p || p.freq_khz === 0) continue;
       // freq_khz is current effective; true base = freq_khz - delta_khz
       // new effective = true_base + pendingKhz = freq_khz + (pendingKhz - delta_khz)
       if (p.freq_khz + pendingKhz - p.delta_khz < 0) return true;

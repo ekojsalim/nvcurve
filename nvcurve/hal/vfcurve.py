@@ -7,7 +7,7 @@ from typing import Optional
 from ..nvapi.bootstrap import nvcall, nvcall_raw
 from ..nvapi.constants import (
     FUNC,
-    VFP_SIZE, VFP_BASE, VFP_STRIDE, VFP_POINTS,
+    VFP_SIZE, VFP_BASE, VFP_STRIDE,
     CT_SIZE, CT_BASE, CT_STRIDE, CT_DELTA_OFF, CT_POINTS,
 )
 from ..nvapi.types import VFPoint, CurveState
@@ -37,7 +37,7 @@ def set_mask_bits(buf, points: set[int], offset: int = 4) -> None:
 # ── Readers ───────────────────────────────────────────────────────────────────
 
 def read_vfp_curve(gpu) -> tuple[Optional[list[tuple[int, int]]], str]:
-    """Read the 128-point base V/F curve (frequency + voltage pairs).
+    """Read the base V/F curve (frequency + voltage pairs).
 
     Returns ([(freq_kHz, volt_uV), ...], "OK") or (None, error).
     """
@@ -137,19 +137,18 @@ def read_curve(gpu, gpu_name: str = "") -> tuple[Optional[CurveState], str]:
 
     points = []
     for i, (freq_khz, volt_uv) in enumerate(vfp_points):
-        if freq_khz == 0 and volt_uv == 0 and i > 0:
-            if i + 1 < len(vfp_points) and vfp_points[i+1][0] == 0:
-                break
-                
         delta_khz = ct_entries[i][0] if i < len(ct_entries) else 0
         flags = ct_entries[i][1] if i < len(ct_entries) else 0
+
+        if flags == 1:
+            # flags=1 marks the start of the memory clock domain. Stop here.
+            break
 
         points.append(VFPoint(
             index=i,
             freq_khz=freq_khz,
             volt_uv=volt_uv,
             delta_khz=delta_khz,
-            is_idle=(flags == 1),
         ))
 
     return CurveState(points=points, timestamp=time.time(), gpu_name=gpu_name), "OK"
@@ -222,15 +221,15 @@ def write_global_offset(gpu, delta_khz: int, dry_run: bool = False) -> tuple[int
     if not curve:
         return -999, f"Failed to read curve: {err}"
     
-    point_deltas = {p.index: delta_khz for p in curve.points if not p.is_idle}
+    point_deltas = {p.index: delta_khz for p in curve.points}
     return write_offsets(gpu, point_deltas, dry_run=dry_run)
 
 
 def reset_offsets(gpu, dry_run: bool = False) -> tuple[int, str]:
-    """Zero all frequency offsets (all non-idle points)."""
+    """Zero all frequency offsets."""
     curve, err = read_curve(gpu)
     if not curve:
         return -999, f"Failed to read curve: {err}"
-        
-    point_deltas = {p.index: 0 for p in curve.points if not p.is_idle}
+
+    point_deltas = {p.index: 0 for p in curve.points}
     return write_offsets(gpu, point_deltas, dry_run=dry_run)

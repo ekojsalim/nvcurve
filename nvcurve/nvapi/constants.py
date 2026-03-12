@@ -53,4 +53,3 @@ VBOOST_SIZE = 0x0028   # GetVoltBoostPercent
 # ── Safety ───────────────────────────────────────────────────────────────────
 
 MAX_DELTA_KHZ = 1_000_000  # ±1000 MHz hard cap (Blackwell driver limit)
-IDLE_POINT    = -1  # Deprecated: Idle point is dynamically detected via flags

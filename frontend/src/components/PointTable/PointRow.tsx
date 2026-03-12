@@ -39,7 +39,6 @@ export function PointRow({ point, isCurrent, isSelected, isClamped, pendingDelta
     : point.delta_khz > 0 ? 'text-emerald-400' : point.delta_khz < 0 ? 'text-red-400' : 'text-zinc-500';
 
   function startEdit() {
-    if (point.is_idle) return;
     setInputValue((displayDeltaMhz).toFixed(1));
     setEditing(true);
     setTimeout(() => {
@@ -64,16 +63,15 @@ export function PointRow({ point, isCurrent, isSelected, isClamped, pendingDelta
     <tr
       ref={trRef}
       className={[
-        'border-b border-zinc-800 text-xs font-mono',
+        'border-b border-zinc-800 text-xs font-mono cursor-pointer',
         isCurrent ? 'bg-yellow-400/10' : isSelected ? 'bg-cyan-500/10' : 'hover:bg-zinc-800/50',
-        point.is_idle ? 'opacity-50' : 'cursor-pointer',
       ].join(' ')}
       onMouseDown={(e) => {
-        if (point.is_idle || editing) return;
+        if (editing) return;
         onMouseDown?.(e);
       }}
       onMouseEnter={() => {
-        if (point.is_idle || editing) return;
+        if (editing) return;
         onMouseEnter?.();
       }}
     >
@@ -98,7 +96,7 @@ export function PointRow({ point, isCurrent, isSelected, isClamped, pendingDelta
             style={{ fontFamily: 'monospace' }}
           />
         ) : (
-          <span title={point.is_idle ? undefined : 'Click to edit'}>
+          <span title="Click to edit">
             {hasPending && <span className="text-cyan-500 mr-0.5">✎</span>}
             {displayDeltaKhz > 0 ? '+' : ''}{displayDeltaMhz.toFixed(1)} MHz
           </span>
@@ -118,7 +116,6 @@ export function PointRow({ point, isCurrent, isSelected, isClamped, pendingDelta
 
       <td className="px-3 py-1">
         {isCurrent && <span className="text-yellow-400">◀ now</span>}
-        {point.is_idle && <span className="text-zinc-600">idle</span>}
         {isSelected && !isCurrent && <span className="text-cyan-500">●</span>}
       </td>
     </tr>

@@ -105,7 +105,6 @@ def _vfpoint_dict(p) -> dict:
         "delta_mhz": p.delta_mhz,
         "effective_freq_khz": p.effective_freq_khz,
         "effective_freq_mhz": p.effective_freq_mhz,
-        "is_idle": p.is_idle,
     }
 
 
@@ -225,7 +224,6 @@ app.add_middleware(
 
 class WriteRequest(BaseModel):
     deltas: dict[int, int]          # {point_index: delta_kHz}
-    force_idle: bool = False
     max_delta_khz: int | None = None  # per-request safety limit override
 
 
@@ -431,9 +429,7 @@ async def api_profile_apply(name: str):
     async with _state["write_lock"]:
         if profile.curve_deltas:
             deltas = {int(k): v for k, v in profile.curve_deltas.items()}
-            curve, err = await _run(read_curve, gpu, _state["gpu_name"])
-            idle_points = {p.index for p in curve.points if p.is_idle} if curve else set()
-            errors = validate_write(deltas, cfg.max_delta_khz, idle_points=idle_points)
+            errors = validate_write(deltas, cfg.max_delta_khz)
             if errors:
                 errs.append("Curve: " + "; ".join(errors))
             else:
@@ -618,10 +614,9 @@ async def api_curve_write(req: WriteRequest):
     cfg: Config = _state["config"]
 
     vfp_state, _ = await _run(read_curve, gpu, _state["gpu_name"])
-    idle_points = {p.index for p in vfp_state.points if p.is_idle} if vfp_state else set()
 
     effective_limit = req.max_delta_khz if req.max_delta_khz is not None else cfg.max_delta_khz
-    errors = validate_write(req.deltas, effective_limit, idle_points=idle_points, allow_idle=req.force_idle)
+    errors = validate_write(req.deltas, effective_limit)
     if errors:
         raise HTTPException(status_code=400, detail={"errors": errors})
 
@@ -664,7 +659,7 @@ async def api_curve_write(req: WriteRequest):
 
 @app.post("/api/curve/write/global")
 async def api_curve_write_global(req: GlobalOffsetRequest):
-    """Apply a uniform frequency offset to all non-idle points."""
+    """Apply a uniform frequency offset to all curve points."""
     gpu = _require_gpu()
     cfg: Config = _state["config"]
 
@@ -672,12 +667,9 @@ async def api_curve_write_global(req: GlobalOffsetRequest):
     if not vfp_state:
         raise HTTPException(status_code=500, detail="Failed to read curve")
 
-    idle_points = {p.index for p in vfp_state.points if p.is_idle}
-    active_points = [p.index for p in vfp_state.points if not p.is_idle]
-
-    all_deltas = {i: req.delta_khz for i in active_points}
+    all_deltas = {p.index: req.delta_khz for p in vfp_state.points}
     effective_limit = req.max_delta_khz if req.max_delta_khz is not None else cfg.max_delta_khz
-    errors = validate_write(all_deltas, effective_limit, idle_points=idle_points)
+    errors = validate_write(all_deltas, effective_limit)
     if errors:
         raise HTTPException(status_code=400, detail={"errors": errors})
 
@@ -754,10 +746,7 @@ async def api_curve_verify(req: VerifyRequest):
     gpu = _require_gpu()
     cfg: Config = _state["config"]
 
-    vfp_state, _ = await _run(read_curve, gpu, _state["gpu_name"])
-    idle_points = {p.index for p in vfp_state.points if p.is_idle} if vfp_state else set()
-
-    errors = validate_write(req.deltas, cfg.max_delta_khz, idle_points=idle_points)
+    errors = validate_write(req.deltas, cfg.max_delta_khz)
     if errors:
         raise HTTPException(status_code=400, detail={"errors": errors})
 
