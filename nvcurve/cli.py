@@ -35,7 +35,7 @@ from .client import NvCurveClient, ServerNotRunning, ApiError
 from .nvapi.constants import (
     VFP_SIZE, VFP_BASE, VFP_STRIDE,
     CT_SIZE, CT_BASE, CT_STRIDE,
-    CT_POINTS, IDLE_POINT,
+    CT_POINTS,
 )
 
 
@@ -505,10 +505,7 @@ def cmd_write(args, client: NvCurveClient):
               f"delta {args.delta:+.0f} MHz")
 
     elif args.glob:
-        for i in range(CT_POINTS):
-            if i != IDLE_POINT or args.force_idle:
-                point_deltas[i] = delta_khz
-        print(f"Target: all {len(point_deltas)} points (global), "
+        print(f"Target: all active points (global), "
               f"delta {args.delta:+.0f} MHz")
 
     else:
@@ -516,13 +513,19 @@ def cmd_write(args, client: NvCurveClient):
         return
 
     if args.dry_run:
-        keys = sorted(point_deltas.keys())
-        preview = keys[:5]
-        tail = f"...and {len(keys) - 5} more" if len(keys) > 5 else ""
-        print()
-        print("DRY RUN — would send:")
-        print(f"  Points: {preview}{(' ' + tail) if tail else ''}")
-        print(f"  Delta:  {delta_khz:+d} kHz ({args.delta:+.0f} MHz)")
+        if args.glob or args.reset:
+            print()
+            print("DRY RUN — would send:")
+            print(f"  Target: {'Reset' if args.reset else 'Global active points'}")
+            print(f"  Delta:  {delta_khz:+d} kHz ({args.delta:+.0f} MHz)")
+        else:
+            keys = sorted(point_deltas.keys())
+            preview = keys[:5]
+            tail = f"...and {len(keys) - 5} more" if len(keys) > 5 else ""
+            print()
+            print("DRY RUN — would send:")
+            print(f"  Points: {preview}{(' ' + tail) if tail else ''}")
+            print(f"  Delta:  {delta_khz:+d} kHz ({args.delta:+.0f} MHz)")
         if max_delta_khz is not None:
             print(f"  Max delta override: {args.max_delta:+.0f} MHz")
         return

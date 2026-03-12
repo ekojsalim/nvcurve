@@ -431,7 +431,9 @@ async def api_profile_apply(name: str):
     async with _state["write_lock"]:
         if profile.curve_deltas:
             deltas = {int(k): v for k, v in profile.curve_deltas.items()}
-            errors = validate_write(deltas, cfg.max_delta_khz)
+            curve, err = await _run(read_curve, gpu, _state["gpu_name"])
+            idle_points = {p.index for p in curve.points if p.is_idle} if curve else set()
+            errors = validate_write(deltas, cfg.max_delta_khz, idle_points=idle_points)
             if errors:
                 errs.append("Curve: " + "; ".join(errors))
             else:
@@ -615,16 +617,18 @@ async def api_curve_write(req: WriteRequest):
     gpu = _require_gpu()
     cfg: Config = _state["config"]
 
+    vfp_state, _ = await _run(read_curve, gpu, _state["gpu_name"])
+    idle_points = {p.index for p in vfp_state.points if p.is_idle} if vfp_state else set()
+
     effective_limit = req.max_delta_khz if req.max_delta_khz is not None else cfg.max_delta_khz
-    errors = validate_write(req.deltas, effective_limit, allow_idle=req.force_idle)
+    errors = validate_write(req.deltas, effective_limit, idle_points=idle_points, allow_idle=req.force_idle)
     if errors:
         raise HTTPException(status_code=400, detail={"errors": errors})
 
     # Check for negative-freq warnings before writing (best-effort, non-blocking)
     freq_warnings: list[str] = []
-    vfp_points, _ = await _run(read_vfp_curve, gpu)
-    if vfp_points:
-        vfp_freqs = [f for f, _v in vfp_points]
+    if vfp_state:
+        vfp_freqs = [p.freq_khz for p in vfp_state.points]
         freq_warnings = check_negative_freq_warnings(
             req.deltas, vfp_freqs, _state["last_offsets"] or []
         )
@@ -661,20 +665,25 @@ async def api_curve_write(req: WriteRequest):
 @app.post("/api/curve/write/global")
 async def api_curve_write_global(req: GlobalOffsetRequest):
     """Apply a uniform frequency offset to all non-idle points."""
-    from .nvapi.constants import CT_POINTS, IDLE_POINT
     gpu = _require_gpu()
     cfg: Config = _state["config"]
 
-    all_deltas = {i: req.delta_khz for i in range(CT_POINTS) if i != IDLE_POINT}
+    vfp_state, _ = await _run(read_curve, gpu, _state["gpu_name"])
+    if not vfp_state:
+        raise HTTPException(status_code=500, detail="Failed to read curve")
+
+    idle_points = {p.index for p in vfp_state.points if p.is_idle}
+    active_points = [p.index for p in vfp_state.points if not p.is_idle]
+
+    all_deltas = {i: req.delta_khz for i in active_points}
     effective_limit = req.max_delta_khz if req.max_delta_khz is not None else cfg.max_delta_khz
-    errors = validate_write(all_deltas, effective_limit)
+    errors = validate_write(all_deltas, effective_limit, idle_points=idle_points)
     if errors:
         raise HTTPException(status_code=400, detail={"errors": errors})
 
     freq_warnings: list[str] = []
-    vfp_points, _ = await _run(read_vfp_curve, gpu)
-    if vfp_points:
-        vfp_freqs = [f for f, _v in vfp_points]
+    if vfp_state:
+        vfp_freqs = [p.freq_khz for p in vfp_state.points]
         freq_warnings = check_negative_freq_warnings(
             all_deltas, vfp_freqs, _state["last_offsets"] or []
         )
@@ -742,11 +751,13 @@ async def api_curve_reset():
 @app.post("/api/curve/verify")
 async def api_curve_verify(req: VerifyRequest):
     """Write-verify-read cycle. Returns per-point match results and collateral changes."""
-    from .nvapi.constants import CT_POINTS
     gpu = _require_gpu()
     cfg: Config = _state["config"]
 
-    errors = validate_write(req.deltas, cfg.max_delta_khz)
+    vfp_state, _ = await _run(read_curve, gpu, _state["gpu_name"])
+    idle_points = {p.index for p in vfp_state.points if p.is_idle} if vfp_state else set()
+
+    errors = validate_write(req.deltas, cfg.max_delta_khz, idle_points=idle_points)
     if errors:
         raise HTTPException(status_code=400, detail={"errors": errors})
 
@@ -792,7 +803,7 @@ async def api_curve_verify(req: VerifyRequest):
 
     collateral = [
         {"point": i, "before_khz": before_offsets[i], "after_khz": after_offsets[i]}
-        for i in range(CT_POINTS)
+        for i in range(len(before_offsets))
         if i not in req.deltas and before_offsets[i] != after_offsets[i]
     ]
 

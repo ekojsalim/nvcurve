@@ -40,7 +40,7 @@ CT_SIZE      = 0x2420  # 9248 bytes
 CT_BASE      = 0x44
 CT_STRIDE    = 0x24    # 36 bytes
 CT_DELTA_OFF = 0x14    # freqDelta offset within entry
-CT_POINTS    = 128
+CT_POINTS    = 255     # Max capacity in modern drivers
 
 # ── Other struct sizes ───────────────────────────────────────────────────────
 
@@ -53,4 +53,4 @@ VBOOST_SIZE = 0x0028   # GetVoltBoostPercent
 # ── Safety ───────────────────────────────────────────────────────────────────
 
 MAX_DELTA_KHZ = 1_000_000  # ±1000 MHz hard cap (Blackwell driver limit)
-IDLE_POINT    = CT_POINTS - 1  # Reserved low-power entry — never modify
+IDLE_POINT    = -1  # Deprecated: Idle point is dynamically detected via flags

@@ -33,7 +33,8 @@ def save(gpu, gpu_name: str, snapshot_dir: str) -> Optional[str]:
         f.write(raw)
 
     offsets = []
-    for i in range(CT_POINTS):
+    max_entries = (len(raw) - CT_BASE) // CT_STRIDE
+    for i in range(max_entries):
         off = CT_BASE + i * CT_STRIDE + CT_DELTA_OFF
         delta = struct.unpack_from("<i", raw, off)[0]
         offsets.append(delta)
