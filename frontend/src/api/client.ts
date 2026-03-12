@@ -46,7 +46,7 @@ export const api = {
 
   /** Write per-point frequency deltas. deltas: { pointIndex: deltaKhz } */
   writeDeltas: (deltas: Record<number, number>) =>
-    post('/curve/write', { deltas }),
+    post<{ ok: boolean; freq_warnings?: string[] }>('/curve/write', { deltas }),
 
   /** Reset all frequency deltas to zero. */
   resetCurve: () => post('/curve/reset'),

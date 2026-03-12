@@ -72,7 +72,7 @@ export default function App() {
               onClick={() => setActiveTab('curve')}
               className={`text-lg font-medium pb-2 -mb-[9px] border-b-2 transition-colors ${activeTab === 'curve' ? 'border-pink-500 text-zinc-100' : 'border-transparent text-zinc-500 hover:text-zinc-300'}`}
             >
-              V/F Curve
+              Curve
             </button>
             <button
               onClick={() => setActiveTab('performance')}

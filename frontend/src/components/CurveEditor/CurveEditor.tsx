@@ -1,8 +1,10 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
+import { Check, X, RotateCcw } from 'lucide-react';
 import { scaleLinear } from 'd3';
 import type { VFPoint, CurveState } from '../../types';
 import { CurveTooltip } from './CurveTooltip';
 import { CurveToolbar } from './CurveToolbar';
+import { ConfirmDialog } from '../common/ConfirmDialog';
 import { activePoints, voltExtent, refBaseMhz, detectClampedPoints } from '../../utils/curveHelpers';
 import { useCurveStore } from '../../store/curveStore';
 
@@ -50,7 +52,41 @@ export function CurveEditor({ curve, currentVoltageMv, currentClockMhz, onRefres
     selectRange,
     clearSelection,
     effectiveMhz,
+    applyEdits,
+    discardEdits,
+    resetAllDeltas,
+    hasNegativeFreqWarning,
   } = useCurveStore();
+
+  const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [dialog, setDialog] = useState<'apply' | 'reset' | null>(null);
+
+  async function handleApplyConfirm() {
+    setDialog(null);
+    setBusy(true);
+    setActionError(null);
+    try {
+      await applyEdits(onRefresh);
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleResetConfirm() {
+    setDialog(null);
+    setBusy(true);
+    setActionError(null);
+    try {
+      await resetAllDeltas(onRefresh);
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
 
   const pts = activePoints(curve.points);
   const activePts = pts;
@@ -223,8 +259,9 @@ export function CurveEditor({ curve, currentVoltageMv, currentClockMhz, onRefres
     }
   }
 
-  // ─── Scroll wheel → zoom x-axis around cursor ────────────────────────────
+  // ─── Scroll wheel → zoom x-axis around cursor (Ctrl/Meta + scroll only) ──
   function handleWheel(e: React.WheelEvent) {
+    if (!e.ctrlKey && !e.metaKey) return; // plain scroll → let page scroll normally
     e.preventDefault();
     const inner = clientToInner(e.clientX, e.clientY);
     if (!inner) return;
@@ -403,27 +440,88 @@ export function CurveEditor({ curve, currentVoltageMv, currentClockMhz, onRefres
   }, [pts, pendingDeltas, stageEdit, selectRange, clearSelection, effectiveMhz]);
 
   return (
-    <div className="bg-zinc-900 rounded-lg p-3 flex flex-col h-full">
-      <div className="flex items-center justify-between px-1 pb-2 border-b border-zinc-800 mb-2">
+    <div className="bg-zinc-900 rounded-lg overflow-hidden flex flex-col h-full">
+      {/* Header: title + action buttons */}
+      <div className="flex items-center justify-between px-3 py-2 border-b border-zinc-800 shrink-0">
         <span className="text-xs text-zinc-500 uppercase tracking-wider font-semibold">V/F Curve</span>
-        {/* Legend */}
-        <div className="flex items-center gap-3 text-xs text-zinc-500">
-          {/* <span className="flex items-center gap-1"><span className="inline-block w-3 h-0.5 bg-violet-400 rounded opacity-60" /> base</span> */}
-          <span className="flex items-center gap-1"><span className="inline-block w-3 h-0.5 bg-emerald-400 rounded" /> effective</span>
-          <span className="flex items-center gap-1"><span className="inline-block w-3 h-px border-t-2 border-dashed border-cyan-400" /> pending</span>
-          <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full bg-amber-500" /> clamped</span>
-          <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full bg-yellow-400" /> current</span>
+        <div className="flex items-center gap-2">
+          {hasPending && (
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-cyan-500/15 border border-cyan-500/30 text-cyan-400 text-xs">
+              {pendingDeltas.size} pending
+            </span>
+          )}
+          <button
+            onClick={() => setDialog('apply')}
+            disabled={!hasPending || busy}
+            className="flex items-center gap-1.5 px-2 py-1 rounded bg-emerald-700 hover:bg-emerald-600 text-white text-xs font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <Check size={12} />
+            Apply
+          </button>
+          <button
+            onClick={() => discardEdits()}
+            disabled={!hasPending || busy}
+            className="flex items-center gap-1.5 px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <X size={12} />
+            Discard
+          </button>
+          <button
+            onClick={() => setDialog('reset')}
+            disabled={busy}
+            className="flex items-center gap-1.5 px-2 py-1 rounded bg-zinc-800 hover:bg-red-900 text-zinc-400 hover:text-red-300 text-xs transition-colors"
+          >
+            <RotateCcw size={12} />
+            Reset
+          </button>
         </div>
       </div>
-      <CurveToolbar
-        onRefresh={onRefresh}
-        activePts={activePts}
-        onResetZoom={() => setXViewport(voltExtent(pts))}
-        isZoomed={Math.abs((xViewport[1] - xViewport[0]) - (voltExtent(pts)[1] - voltExtent(pts)[0])) > 5}
-      />
+
+      {/* Banners */}
+      {hasNegativeFreqWarning() && (
+        <div className="px-3 py-1.5 bg-amber-900/40 border-b border-amber-700 text-amber-300 text-xs">
+          ⚠ One or more pending deltas would produce a negative effective frequency. The driver will clamp to 0 MHz.
+        </div>
+      )}
+      {actionError && (
+        <div className="px-3 py-1.5 bg-red-900/40 border-b border-red-700 text-red-300 text-xs flex items-center justify-between">
+          <span>⚠ {actionError}</span>
+          <button onClick={() => setActionError(null)} className="ml-2 text-red-400 hover:text-red-200">✕</button>
+        </div>
+      )}
+
+      {/* Confirm dialogs */}
+      {dialog === 'apply' && (
+        <ConfirmDialog
+          message={`Apply ${pendingDeltas.size} pending change${pendingDeltas.size !== 1 ? 's' : ''} to hardware?`}
+          detail="This will write the staged frequency deltas to the GPU via NvAPI. The changes take effect immediately."
+          confirmLabel="Apply"
+          onConfirm={handleApplyConfirm}
+          onCancel={() => setDialog(null)}
+        />
+      )}
+      {dialog === 'reset' && (
+        <ConfirmDialog
+          message="Reset all frequency offsets to zero?"
+          detail="This will write zero delta to every V/F point on the GPU. Any pending staged changes will also be discarded."
+          confirmLabel="Reset"
+          isDestructive
+          onConfirm={handleResetConfirm}
+          onCancel={() => setDialog(null)}
+        />
+      )}
+
+      <div className="px-3 pt-3">
+        <CurveToolbar
+          onRefresh={onRefresh}
+          activePts={activePts}
+          onResetZoom={() => setXViewport(voltExtent(pts))}
+          isZoomed={Math.abs((xViewport[1] - xViewport[0]) - (voltExtent(pts)[1] - voltExtent(pts)[0])) > 5}
+        />
+      </div>
 
       {/* Need tabIndex=0 to capture keyboard events */}
-      <div className="flex-1 min-h-0 relative focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500/50 rounded"
+      <div className="flex-1 min-h-0 relative focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500/50 px-3 pb-3"
         ref={containerRef}
         style={{ maxHeight: '600px' }}
         tabIndex={0}
@@ -603,12 +701,11 @@ export function CurveEditor({ curve, currentVoltageMv, currentClockMhz, onRefres
                 if (p.volt_mv < xViewport[0] - 5 || p.volt_mv > xViewport[1] + 5) return null;
 
                 const cx = xScale(p.volt_mv);
-                /** Confirmed position (hardware state) */
+                /** Confirmed position (hardware state — VFP effective frequency) */
                 const confirmedCy = yScale(p.freq_mhz);
                 /** Staged/pending position (what will be applied) */
                 const pendingCy = yScale(effectiveMhz(p));
                 const hasPendingEdit = pendingDeltas.has(p.index);
-                const isClamped = clampedPoints.has(p.index);
                 /**
                  * The "main" interactive circle sits at the pending position when
                  * there's a staged edit — that's the point the user is working with.
@@ -623,8 +720,6 @@ export function CurveEditor({ curve, currentVoltageMv, currentClockMhz, onRefres
 
                 let fill = '#34d399';
                 if (p.is_idle) fill = '#52525b';
-                else if (isClamped) fill = '#f59e0b'; // amber for clamped
-                // Staged edit: override to cyan so it's visually distinct
                 if (hasPendingEdit && !isSelected) fill = '#22d3ee';
                 if (isSelected) fill = '#22d3ee';
 

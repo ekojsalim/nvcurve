@@ -9,5 +9,6 @@ export default defineConfig({
       '/api': 'http://localhost:8042',
       '/ws': { target: 'ws://localhost:8042', ws: true },
     },
+    allowedHosts: ["localhost", ".localhost", ".ts.net"]
   },
 })

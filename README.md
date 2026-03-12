@@ -6,83 +6,154 @@
 
 ---
 
-NVCurve is a Linux-native GPU overclocking tool, providing MSI Afterburner-like per-point voltage-frequency curve control for NVIDIA GPUs. It uses undocumented NvAPI functions via `libnvidia-api.so` for exact hardware-level tuning.
+NVCurve brings MSI Afterburner-style per-point voltage-frequency curve control to Linux. It calls undocumented NvAPI functions directly via `libnvidia-api.so`, giving you precise hardware-level frequency offsets without abstraction-layer overhead. A Python CLI handles scripting and headless use; a React web UI provides interactive curve editing, profile management, and live hardware monitoring.
 
-It features both a robust Python CLI and a modern React web interface for interactive curve editing, profile management, and live hardware monitoring.
+> [!WARNING]
+> **This tool is experimental.** Verified only on an **RTX 5090** with driver **580.126.18**. Compatibility with other GPUs and driver versions is unknown. The underlying NvAPI functions are undocumented and may change or disappear between driver releases.
+>
+> Read operations are generally safe. Write operations alter GPU frequency offsets at a hardware level. **Follow the first-time setup steps below before applying any changes**, and proceed with caution.
 
-> **Note:** This tool relies on undocumented NvAPI features. While read operations are safe, write operations adjust GPU frequency offsets at a hardware level. Use at your own risk.
+![NVCurve curve editor](.github/screenshots/curve-editor.png)
 
 ## Features
 
-- **Per-Point Curve Editing**: Independently adjust the frequency offset for any point on the GPU's voltage-frequency curve.
-- **Modern Web UI**: Interactive visual curve editor, point table, and real-time monitoring dashboard.
-- **Live Monitoring**: Tracks GPU voltage, clock speed, temperature, and power draw using both NvAPI and NVML.
-- **Profile Management**: Save and load clock settings.
-- **CLI Support**: Full terminal interface for scripting and headless use.
+- **Per-Point Curve Editing**: Independently adjust the frequency offset for any voltage point on the GPU's V/F curve.
+- **Live Monitoring**: Tracks GPU voltage, clock speed, temperature, and power draw via NvAPI and NVML.
+- **Profile Management**: Save and load named clock configurations.
+- **Modern Web UI**: Interactive curve graph, point table, and real-time monitoring dashboard — all in the browser.
+- **CLI**: Full terminal interface for scripting, automation, and headless systems.
 
 ## Prerequisites
 
 - **OS**: Linux
-- **GPU**: NVIDIA GPU (Tested on RTX 5090 Blackwell architecture)
-- **Driver**: Proprietary NVIDIA drivers (Tested on 580.126.18)
+- **GPU**: NVIDIA GPU (tested on RTX 5090, Blackwell architecture)
 - **Python**: 3.12+
-- **Privileges**: NVCurve requires `root` access for hardware interactions. The CLI will automatically prompt for elevated privileges via `sudo` when needed.
+- **Privileges**: Root access is required for hardware interactions. The CLI will prompt for elevated privileges via `sudo` when needed.
 
 ## Installation
 
-NVCurve is distributed as a Python tool and uses `uv` for dependency management.
+We recommend installing with [uv](https://docs.astral.sh/uv/getting-started/installation/):
 
 ```bash
-# Install globally via uv tool
 uv tool install nvcurve
-
-# Alternatively, run directly from source
-uv run -m nvcurve serve
 ```
 
-*Note: For the web UI frontend development, use `pnpm install` and `pnpm run dev` in the `frontend` directory.*
+*For frontend development, use `pnpm install` and `pnpm run dev` in the `frontend/` directory.*
 
-## Usage
+## Getting started
 
-NVCurve gracefully handles privilege escalation. If you run a command as a standard user, it will automatically prompt for your `sudo` password to interface directly with the NVIDIA driver.
+### Step 1 — Verify hardware compatibility
 
-### Starting the Web Interface
-To start the API server and serve the web UI:
+Before touching anything, confirm NvAPI is working correctly on your GPU and driver. **Do not skip this on an untested configuration.**
+
+Probe all required NvAPI functions:
+
 ```bash
-nvcurve serve
+nvcurve read --diag
 ```
-Then navigate to `http://localhost:8042` in your browser.
 
-### Command Line Interface
-NVCurve offers a full-featured CLI:
+Every entry under `=== Function probe ===` should show `resolved`. If any critical function shows `NOT FOUND`, write operations will not work and the tool is unsupported on your system.
+
+Read your current curve to establish a baseline:
 
 ```bash
-# Read the current curve
-nvcurve read --full
+nvcurve read
+```
 
-# Live terminal monitoring
-nvcurve monitor
+Run a write-and-verify cycle with a small, safe offset to confirm the write path works end-to-end:
 
-# Set a global +100 MHz offset
-nvcurve write --global --delta 100
+```bash
+nvcurve verify --point 80 --delta 15
+```
 
-# Set a +50 MHz offset for a specific V/F point (e.g., point 80)
-nvcurve write --point 80 --delta 50
+This writes `+15 MHz` to point 80, reads it back, and confirms whether the driver accepted the change — including whether any other points were unexpectedly modified. Restore your baseline afterwards:
 
-# Reset the curve to default
-nvcurve write --reset
+```bash
+nvcurve snapshot restore
+```
 
-# Save the current state to a profile
-nvcurve profile save my_profile
+Only continue once `verify` reports success.
+
+### Step 2 — Launch the web UI
+
+With compatibility confirmed, the web UI is the primary interface for curve editing, monitoring, and profile management:
+
+```bash
+nvcurve
+```
+
+This starts the backend server and opens the UI in your browser at `http://localhost:8042`.
+
+![NVCurve web UI dashboard](.github/screenshots/dashboard.png)
+
+To run the server in the background:
+
+```bash
+nvcurve serve start --detach
+nvcurve serve status
+nvcurve serve stop
+```
+
+## CLI reference
+
+The CLI is suited for scripting, headless systems, or quick one-off operations. All write commands support `--dry-run` to preview changes without applying them.
+
+### Reading
+
+```bash
+nvcurve read                   # Condensed V/F curve
+nvcurve read --full            # All 128 points
+nvcurve read --json            # JSON output
+```
+
+### Writing
+
+> [!NOTE]
+> If you use LACT or similar tools, disable them first — concurrent writes will overwrite each other.
+
+```bash
+# Preview first
+nvcurve write --global --delta 50 --dry-run
+nvcurve write --point 80 --delta 100 --dry-run
+
+# Apply
+nvcurve write --global --delta 50
+nvcurve write --point 80 --delta 100
+nvcurve write --range 70-90 --delta 75
+nvcurve write --reset          # Reset all offsets to 0
+```
+
+Snapshots are saved automatically before each write. Manual snapshot management:
+
+```bash
+nvcurve snapshot save
+nvcurve snapshot list
+nvcurve snapshot restore
+```
+
+### Profiles
+
+```bash
+nvcurve profile save --name balanced
+nvcurve profile apply --name balanced
+nvcurve profile list
+```
+
+### Diagnostics
+
+```bash
+nvcurve read --diag            # Probe all NvAPI functions
+nvcurve inspect --point 80     # Raw buffer fields for a point
+nvcurve inspect --range 78-82
 ```
 
 ## Architecture
 
-NVCurve is split into two primary components:
-1. **Python API Backend (`nvcurve/`)**: Interfaces directly with `libnvidia-api.so` (via ctypes) and `libnvidia-ml.so` to read/write hardware states. It exposes these mechanisms via a FastAPI REST+WebSocket server to provide privilege isolation.
-2. **React Frontend (`frontend/`)**: A rich interactive GUI running in the browser, communicating with the root backend remotely. 
+NVCurve has two components:
 
-For full technical specifications surrounding the NvAPI buffer layouts and function endpoints utilized, please refer to the internal documentation.
+- **Python backend (`nvcurve/`)**: Talks directly to `libnvidia-api.so` (via ctypes) and `libnvidia-ml.so` to read and write hardware state. Exposes everything through a FastAPI REST + WebSocket server, keeping privileged operations isolated from the browser.
+- **React frontend (`frontend/`)**: Runs in the browser and communicates with the backend over HTTP and WebSockets. Handles curve visualization, point editing, live monitoring, and profile management.
 
 ## Disclaimer
-These functions are undocumented and unsupported by NVIDIA. They may alter or break between driver versions. Write functions can alter GPU behavior and should be used with extreme caution. The authors accept no responsibility for hardware damage resulting from the use of this software.
+
+This software is provided as-is. The NvAPI functions it relies on are undocumented, unsupported by NVIDIA, and may change or break without notice between driver versions. NVCurve has been verified on a single GPU (RTX 5090) and driver version (580.126.18) — behaviour on other hardware is unknown. Write operations alter GPU state at a hardware level. The authors accept no responsibility for hardware damage, system instability, or data loss resulting from the use of this software.

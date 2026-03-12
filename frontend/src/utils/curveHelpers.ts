@@ -8,12 +8,15 @@ export function activePoints(points: VFPoint[]): VFPoint[] {
 /**
  * Approximate reference frequency (MHz) for a point: effective − delta.
  *
- * This is NOT the true hardware base. NVIDIA enforces monotonicity across the
- * V/F curve — a delta on a lower-voltage point pushes up subsequent points'
- * effective frequencies even when those points have zero delta. So for
- * monotonicity-affected points, `effective - delta` doesn't recover the true
- * base. It's still useful as a faint reference line in the chart ("where would
- * this point be if only its own delta were removed").
+ * `p.freq_mhz` is the current effective frequency as reported by GetVFPCurve
+ * (already including any applied boost delta). Subtracting the delta gives an
+ * approximation of the hardware base.
+ *
+ * Note: NVIDIA enforces monotonicity across the V/F curve — a large delta on
+ * a lower-voltage point pushes up neighbouring points' effective frequencies
+ * even when those points have zero delta. So for monotonicity-affected points,
+ * `effective - delta` doesn't recover the true unmodified base. It is still
+ * useful as a faint reference line ("where this point would sit with no boost").
  */
 export function refBaseMhz(p: VFPoint): number {
   return p.freq_mhz - p.delta_mhz;
@@ -46,7 +49,7 @@ export function voltExtent(points: VFPoint[], padMv = 20): [number, number] {
 export function freqExtent(points: VFPoint[], padMhz = 50): [number, number] {
   const active = activePoints(points);
   if (active.length === 0) return [1000, 3000];
-  // freq_mhz is the effective value; also consider ref base for lower bound
+  // freq_mhz is the current effective value; also consider ref base for lower bound
   const allFreqs = active.flatMap((p) => [p.freq_mhz, refBaseMhz(p)]);
   const min = Math.min(...allFreqs);
   const max = Math.max(...active.map((p) => p.freq_mhz));

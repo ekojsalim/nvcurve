@@ -38,7 +38,7 @@ from .nvapi.constants import (
     CT_POINTS, IDLE_POINT,
     MASK_SIZE, VOLT_SIZE, RANGES_SIZE, PERF_SIZE, VBOOST_SIZE,
 )
-from .safety import validate_write
+from .safety import validate_write, check_negative_freq_warnings
 
 
 # ── Utilities ────────────────────────────────────────────────────────────────
@@ -379,6 +379,16 @@ def cmd_write(gpu, gpu_name, args, cfg: Config):
             print(hexdump(bytes(buf), entry_off, CT_STRIDE))
         return
 
+    # Warn if any delta would result in negative effective frequency.
+    points_data, _ = read_vfp_curve(gpu)
+    if points_data:
+        vfp_freqs = [f for f, _v in points_data]
+        freq_warnings = check_negative_freq_warnings(
+            point_deltas, vfp_freqs, current_offsets or []
+        )
+        for w in freq_warnings:
+            print(f"WARNING: {w}")
+
     if cfg.auto_snapshot:
         print()
         print("Saving pre-write snapshot...")
@@ -623,11 +633,20 @@ def cmd_profile(gpu, gpu_name, args, cfg: Config):
 # ── Argument parser ───────────────────────────────────────────────────────────
 
 def build_parser() -> argparse.ArgumentParser:
+    from importlib.metadata import version as pkg_version
+    try:
+        __version__ = pkg_version("nvcurve")
+    except Exception:
+        __version__ = "unknown"
+
     parser = argparse.ArgumentParser(
+        prog="nvcurve",
         description="Read/Write NVIDIA GPU V/F curve via undocumented NvAPI (Linux)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  %(prog)s                               Launch web UI (default)
+  %(prog)s serve start --detach          Start server in background
   %(prog)s read                          Condensed V/F curve
   %(prog)s read --full                   All 128 points
   %(prog)s read --json                   JSON output
@@ -642,10 +661,11 @@ Examples:
   %(prog)s snapshot list                 List all saved snapshots
 """,
     )
+    parser.add_argument("-v", "--version", action="version", version=f"nvcurve {__version__}")
     sub = parser.add_subparsers(dest="command")
 
     # read
-    p_read = sub.add_parser("read", help="Read V/F curve (default)")
+    p_read = sub.add_parser("read", help="Read V/F curve")
     p_read.add_argument("--full", action="store_true", help="Show all 128 points")
     p_read.add_argument("--json", action="store_true", help="JSON output")
     p_read.add_argument("--raw", action="store_true", help="Include hex dumps")
@@ -670,8 +690,8 @@ Examples:
                          help="Preview changes without applying")
     p_write.add_argument("--force-idle", action="store_true",
                          help="Allow modifying point 127 (idle)")
-    p_write.add_argument("--max-delta", type=float, default=300.0,
-                         help="Override safety limit (MHz, default 300)")
+    p_write.add_argument("--max-delta", type=float, default=1000.0,
+                         help="Override safety limit (MHz, default 1000)")
 
     # verify
     p_ver = sub.add_parser("verify", help="Write-verify-read cycle")
@@ -714,14 +734,86 @@ Examples:
 def require_root():
     """Ensure the process is running as root, by re-invoking via sudo if necessary."""
     if os.geteuid() != 0:
-        print("NVCurve requires root privileges to interface with the NVIDIA driver.")
-        print("Requesting elevated permissions...")
         try:
             # Prevent Python from creating root-owned __pycache__ inside the user's site-packages
             os.execvp("sudo", ["sudo", "env", "PYTHONDONTWRITEBYTECODE=1", sys.executable, "-m", "nvcurve"] + sys.argv[1:])
         except Exception as e:
-            print(f"Failed to elevate privileges: {e}", file=sys.stderr)
+            print(f"nvcurve: sudo failed: {e}", file=sys.stderr)
             sys.exit(1)
+
+
+_PID_FILE = "/run/nvcurve.pid"
+
+
+def _resolve_pid_file() -> str:
+    return _PID_FILE if os.geteuid() == 0 else "/tmp/nvcurve.pid"
+
+
+def _log_file() -> str:
+    return "/var/log/nvcurve.log" if os.geteuid() == 0 else "/tmp/nvcurve.log"
+
+
+def _cmd_serve_start(args, cfg: Config, open_browser: bool = False) -> None:
+    pid_file = _resolve_pid_file()
+
+    if os.path.exists(pid_file):
+        try:
+            with open(pid_file) as f:
+                pid = int(f.read().strip())
+            os.kill(pid, 0)
+            # Server already running — just open browser if requested
+            host = getattr(args, "host", "127.0.0.1")
+            port = getattr(args, "port", 8042)
+            url = f"http://{host}:{port}"
+            print(f"Server is already running (PID {pid}).")
+            if open_browser:
+                import webbrowser
+                webbrowser.open(url)
+            return
+        except (ProcessLookupError, ValueError, OSError):
+            os.remove(pid_file)
+
+    if getattr(args, "detach", False):
+        import subprocess
+        # We are already root (require_root() ran first) — no need for sudo.
+        cmd = [sys.executable, "-m", "nvcurve", "serve", "start"]
+        if getattr(args, "host", None): cmd += ["--host", args.host]
+        if getattr(args, "port", None): cmd += ["--port", str(args.port)]
+        if getattr(args, "gpu_index", None): cmd += ["--gpu", str(args.gpu_index)]
+
+        log_path = _log_file()
+        print("Starting nvcurve server in background...")
+        with open(log_path, "a") as lf:
+            p = subprocess.Popen(cmd, stdout=lf, stderr=lf, start_new_session=True)
+        # Do NOT write the pid file here — the child writes its own PID in
+        # foreground mode. Writing it here causes the child to see the file on
+        # startup, mistake itself for an already-running instance, and exit.
+        print(f"Server starting (PID {p.pid}). Logs: {log_path}")
+
+        if open_browser:
+            host = getattr(args, "host", "127.0.0.1")
+            port = getattr(args, "port", 8042)
+            # Give the server a moment to start
+            time.sleep(1.5)
+            import webbrowser
+            webbrowser.open(f"http://{host}:{port}")
+        return
+
+    # Foreground mode
+    with open(pid_file, "w") as f:
+        f.write(str(os.getpid()))
+    try:
+        from .server import run as server_run
+        server_run(
+            host=getattr(args, "host", "127.0.0.1"),
+            port=getattr(args, "port", 8042),
+            gpu_index=getattr(args, "gpu_index", 0),
+            config=cfg,
+            open_browser=open_browser,
+        )
+    finally:
+        if os.path.exists(pid_file):
+            os.remove(pid_file)
 
 
 def main():
@@ -730,99 +822,51 @@ def main():
     parser = build_parser()
     args = parser.parse_args()
 
-    # Default to 'read' with no args
-    if args.command is None:
-        args.command = "read"
-        args.full = False
-        args.json = False
-        args.raw = False
-        args.diag = False
-
     cfg = Config()
+
+    # Default with no subcommand: launch the web UI (serve foreground + open browser).
+    if args.command is None:
+        _cmd_serve_start(args, cfg, open_browser=True)
+        return
 
     # serve: the server initializes the GPU itself via FastAPI lifespan
     if args.command == "serve":
-        PID_FILE = "/run/nvcurve.pid"
-        if os.geteuid() != 0:
-            PID_FILE = "/tmp/nvcurve.pid"
-
-        action = getattr(args, "action", "start") or "start"
+        action = getattr(args, "action", None) or "start"
 
         if action == "start":
-            if os.path.exists(PID_FILE):
-                try:
-                    with open(PID_FILE, "r") as f:
-                        pid = int(f.read().strip())
-                    os.kill(pid, 0)
-                    print(f"Error: Server is already running (PID {pid}).")
-                    return
-                except (ProcessLookupError, ValueError, OSError):
-                    os.remove(PID_FILE)
-
-            if getattr(args, "detach", False):
-                import subprocess
-                # Re-run ourselves without --detach, redirecting output
-                cmd = ["sudo", sys.executable, "-m", "nvcurve", "serve", "start"]
-                if args.host: cmd += ["--host", args.host]
-                if args.port: cmd += ["--port", str(args.port)]
-                if args.gpu_index: cmd += ["--gpu", str(args.gpu_index)]
-                
-                # Use a log file for background mode
-                log_file = "/var/log/nvcurve.log"
-                if os.geteuid() != 0:
-                    log_file = "/tmp/nvcurve.log"
-                
-                print(f"Starting nvcurve server in background...")
-                with open(log_file, "a") as log:
-                    p = subprocess.Popen(cmd, stdout=log, stderr=log, start_new_session=True)
-                    with open(PID_FILE, "w") as f:
-                        f.write(str(p.pid))
-                print(f"Server started (PID {p.pid}). Logs: {log_file}")
-                return
-            else:
-                # Foreground mode
-                with open(PID_FILE, "w") as f:
-                    f.write(str(os.getpid()))
-                try:
-                    from .server import run as server_run
-                    # We need to ensure cfg is populated if we use it inside server_run
-                    # but server_run takes direct arguments normally.
-                    server_run(host=args.host, port=args.port, gpu_index=args.gpu_index, config=cfg)
-                finally:
-                    if os.path.exists(PID_FILE):
-                        os.remove(PID_FILE)
-                return
+            _cmd_serve_start(args, cfg, open_browser=False)
 
         elif action == "stop":
-            if not os.path.exists(PID_FILE):
+            pid_file = _resolve_pid_file()
+            if not os.path.exists(pid_file):
                 print("Server is not running.")
                 return
             try:
-                with open(PID_FILE, "r") as f:
+                with open(pid_file) as f:
                     pid = int(f.read().strip())
                 print(f"Stopping server (PID {pid})...")
-                os.kill(pid, 15) # SIGTERM
+                os.kill(pid, 15)  # SIGTERM
                 time.sleep(1)
-                if os.path.exists(PID_FILE):
-                    os.remove(PID_FILE)
+                if os.path.exists(pid_file):
+                    os.remove(pid_file)
                 print("Stopped.")
             except Exception as e:
                 print(f"Error stopping server: {e}")
-            return
 
         elif action == "status":
-            if not os.path.exists(PID_FILE):
+            pid_file = _resolve_pid_file()
+            if not os.path.exists(pid_file):
                 print("Server is NOT running.")
             else:
                 try:
-                    with open(PID_FILE, "r") as f:
+                    with open(pid_file) as f:
                         pid = int(f.read().strip())
                     os.kill(pid, 0)
                     print(f"Server is running (PID {pid}).")
                 except (ProcessLookupError, OSError):
                     print("Server is NOT running (stale PID file found).")
-                    os.remove(PID_FILE)
-            return
+                    os.remove(pid_file)
+        return
 
     # Allow --max-delta to override the safety limit
     if args.command == "write" and hasattr(args, "max_delta"):

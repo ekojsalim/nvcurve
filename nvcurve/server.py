@@ -49,11 +49,12 @@ from .profiles.native import (
 from .hal.vfcurve import (
     read_clock_offsets,
     read_curve,
+    read_vfp_curve,
     reset_offsets,
     write_global_offset,
     write_offsets,
 )
-from .safety import validate_write
+from .safety import validate_write, check_negative_freq_warnings
 
 log = logging.getLogger("nvcurve.server")
 
@@ -155,7 +156,7 @@ async def _monitor_poller() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _state["write_lock"] = asyncio.Lock()
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     # Initialize GPU (blocking)
     try:
@@ -232,7 +233,7 @@ class ProfileRenameRequest(BaseModel):
 # ── Helper: run blocking HAL call in thread pool ──────────────────────────────
 
 async def _run(fn, *args):
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, fn, *args)
 
 
@@ -502,7 +503,7 @@ async def api_limits_update(req: LimitsRequest):
 
 
 async def _reapply_curve() -> None:
-    """Re-write the last known V/F curve offsets to hardware."""
+    """Re-write the last known V/F curve offsets to hardware and notify WS clients."""
     gpu = _state["gpu"]
     last = _state["last_offsets"]
     if gpu is None or not last:
@@ -512,6 +513,12 @@ async def _reapply_curve() -> None:
         return
     try:
         await _run(write_offsets, gpu, deltas)
+        offsets, _ = await _run(read_clock_offsets, gpu)
+        _state["last_offsets"] = offsets
+        if _state["curve_clients"]:
+            state, _ = await _run(read_curve, gpu, _state["gpu_name"])
+            if state:
+                await _broadcast(_state["curve_clients"], _curve_state_dict(state))
     except Exception as exc:
         log.warning("_reapply_curve: %s", exc)
 
@@ -587,6 +594,15 @@ async def api_curve_write(req: WriteRequest):
     if errors:
         raise HTTPException(status_code=400, detail={"errors": errors})
 
+    # Check for negative-freq warnings before writing (best-effort, non-blocking)
+    freq_warnings: list[str] = []
+    vfp_points, _ = await _run(read_vfp_curve, gpu)
+    if vfp_points:
+        vfp_freqs = [f for f, _v in vfp_points]
+        freq_warnings = check_negative_freq_warnings(
+            req.deltas, vfp_freqs, _state["last_offsets"] or []
+        )
+
     async with _state["write_lock"]:
         warning = await _reconcile_check()
 
@@ -611,6 +627,8 @@ async def api_curve_write(req: WriteRequest):
     result = {"ok": True, "return_code": ret, "description": desc}
     if warning:
         result["warning"] = warning
+    if freq_warnings:
+        result["freq_warnings"] = freq_warnings
     return result
 
 
@@ -625,6 +643,14 @@ async def api_curve_write_global(req: GlobalOffsetRequest):
     errors = validate_write(all_deltas, cfg.max_delta_khz)
     if errors:
         raise HTTPException(status_code=400, detail={"errors": errors})
+
+    freq_warnings: list[str] = []
+    vfp_points, _ = await _run(read_vfp_curve, gpu)
+    if vfp_points:
+        vfp_freqs = [f for f, _v in vfp_points]
+        freq_warnings = check_negative_freq_warnings(
+            all_deltas, vfp_freqs, _state["last_offsets"] or []
+        )
 
     async with _state["write_lock"]:
         warning = await _reconcile_check()
@@ -649,6 +675,8 @@ async def api_curve_write_global(req: GlobalOffsetRequest):
     result = {"ok": True, "return_code": ret, "description": desc}
     if warning:
         result["warning"] = warning
+    if freq_warnings:
+        result["freq_warnings"] = freq_warnings
     return result
 
 
@@ -774,6 +802,10 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pathlib import Path
 
+# When set, suppresses the auto-open browser behaviour so the dev can open
+# the Vite dev server (pnpm dev) manually instead.
+_DEV_PORT = os.environ.get("NVCURVE_DEV_PORT")
+
 # Robust asset resolution using importlib.resources
 try:
     from importlib.resources import files as _resource_files
@@ -800,18 +832,18 @@ if os.path.isdir(os.path.join(_dist_dir, "assets")):
 async def serve_spa(catchall: str):
     if catchall.startswith("api/") or catchall.startswith("ws/"):
         raise HTTPException(status_code=404, detail="Not Found")
-        
+
     if not os.path.isdir(_dist_dir):
         return {"error": "Frontend not built. Run pnpm build in frontend/."}
-    
+
     path = os.path.join(_dist_dir, catchall)
     if os.path.isfile(path) and catchall:
         return FileResponse(path)
-    
+
     index = os.path.join(_dist_dir, "index.html")
     if os.path.isfile(index):
         return FileResponse(index)
-        
+
     raise HTTPException(status_code=404, detail="Not Found")
 
 
@@ -823,34 +855,53 @@ def create_app(config: Config = default_config) -> FastAPI:
     return app
 
 
-def run(host: str = "127.0.0.1", port: int = 8042, gpu_index: int = 0, config: Config = default_config) -> None:
+def run(
+    host: str = "127.0.0.1",
+    port: int = 8042,
+    gpu_index: int = 0,
+    config: Config = default_config,
+    open_browser: bool = False,
+) -> None:
     """Start the uvicorn server. Blocking."""
-    import uvicorn
     import socket
+    import threading
+    import uvicorn
+
     _state["gpu_index"] = gpu_index
     _state["config"] = config
 
-    # Port fallback logic
+    # Suppress noisy websockets keepalive ping-timeout tracebacks — these are
+    # normal disconnection events (browser tab closed, network hiccup) and
+    # logging them at ERROR level creates false alarm noise.
+    logging.getLogger("websockets").setLevel(logging.CRITICAL)
+
+    # Port fallback: find first available port starting from the requested one.
     final_port = port
-    max_retries = 10
-    for i in range(max_retries):
+    for i in range(10):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             try:
                 s.bind((host, final_port))
                 break
             except socket.error:
-                if i == max_retries - 1:
-                    print(f"Error: Could not find an available port after {max_retries} attempts.")
+                if i == 9:
+                    print(f"Error: No available port found in range {port}–{port + 9}.")
                     return
                 final_port += 1
 
-    # Premium startup message
+    url = f"http://{host}:{final_port}"
+
+    # Print banner *before* uvicorn starts so it appears above uvicorn's own output.
+    # GPU name is populated by the lifespan; we omit it here since the server
+    # hasn't started yet, and the lifespan logs it via log.info.
     print("\033[1;36m" + "─" * 60 + "\033[0m")
-    print("\033[1;32m" + "  NVCurve Server Ready".center(60) + "\033[0m")
-    print(f"  URL: http://{host}:{final_port}".center(60))
-    print(f"  GPU: {_state.get('gpu_name', 'Initializing...')}".center(60))
+    print("\033[1;32m" + "  NVCurve".center(60) + "\033[0m")
+    print(f"  {url}".center(60))
     print("\033[1;36m" + "─" * 60 + "\033[0m")
     print("  Press Ctrl+C to stop.")
     print()
+
+    if open_browser and not _DEV_PORT:
+        import webbrowser
+        threading.Timer(1.2, lambda: webbrowser.open(url)).start()
 
     uvicorn.run(app, host=host, port=final_port, log_level="warning", access_log=False)

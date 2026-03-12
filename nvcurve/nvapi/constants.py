@@ -52,5 +52,5 @@ VBOOST_SIZE = 0x0028   # GetVoltBoostPercent
 
 # ── Safety ───────────────────────────────────────────────────────────────────
 
-MAX_DELTA_KHZ = 300_000   # ±300 MHz hard cap
-IDLE_POINT    = 127        # Reserved low-power entry — never modify
+MAX_DELTA_KHZ = 1_000_000  # ±1000 MHz hard cap (Blackwell driver limit)
+IDLE_POINT    = CT_POINTS - 1  # Reserved low-power entry — never modify

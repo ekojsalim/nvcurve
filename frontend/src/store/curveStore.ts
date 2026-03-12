@@ -45,6 +45,8 @@ interface CurveStore {
 
   // Derived helper — effective MHz for a point including any pending delta
   effectiveMhz: (point: VFPoint) => number;
+  // True if any pending delta would produce a negative effective frequency
+  hasNegativeFreqWarning: () => boolean;
 }
 
 export const useCurveStore = create<CurveStore>()((set, get) => ({
@@ -113,9 +115,13 @@ export const useCurveStore = create<CurveStore>()((set, get) => ({
     pendingDeltas.forEach((v, k) => { deltas[k] = v; });
 
     try {
-      await api.writeDeltas(deltas);
+      const result = await api.writeDeltas(deltas);
       set({ pendingDeltas: new Map(), selectedPoints: new Set(), activeProfile: null });
-      toast.success('Curve applied successfully');
+      if (result?.freq_warnings?.length) {
+        toast.warning('Curve applied — driver clamped some points to 0 MHz (negative freq delta)');
+      } else {
+        toast.success('Curve applied successfully');
+      }
       onSuccess();
     } catch (e: any) {
       toast.error('Failed to apply curve: ' + (e.message || String(e)));
@@ -159,13 +165,25 @@ export const useCurveStore = create<CurveStore>()((set, get) => ({
   effectiveMhz: (point) => {
     const { pendingDeltas } = get();
     if (pendingDeltas.has(point.index)) {
-      // Apply the delta *change* on top of the current effective freq.
-      // We can't reliably compute the true base (due to driver monotonicity
-      // enforcement), so we just adjust relative to the current effective.
+      // freq_mhz is the current effective (VFP freq, already includes applied delta).
+      // Adjust by the change in delta: (pending - current_delta).
       const pendingKhz = pendingDeltas.get(point.index)!;
       const deltaChange = pendingKhz - point.delta_khz;
       return point.freq_mhz + deltaChange / 1000;
     }
     return point.freq_mhz;
+  },
+
+  hasNegativeFreqWarning: () => {
+    const { pendingDeltas, curve } = get();
+    if (!curve || pendingDeltas.size === 0) return false;
+    for (const [index, pendingKhz] of pendingDeltas) {
+      const p = curve.points.find((pt) => pt.index === index);
+      if (!p || p.is_idle || p.freq_khz === 0) continue;
+      // freq_khz is current effective; true base = freq_khz - delta_khz
+      // new effective = true_base + pendingKhz = freq_khz + (pendingKhz - delta_khz)
+      if (p.freq_khz + pendingKhz - p.delta_khz < 0) return true;
+    }
+    return false;
   },
 }));
