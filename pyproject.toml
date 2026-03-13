@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "nvcurve"
-version = "0.2.0"
+version = "0.3.0"
 description = "Linux GPU V/F curve editor for NVIDIA GPUs"
 requires-python = ">=3.12"
 dependencies = [
