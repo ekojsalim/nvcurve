@@ -155,19 +155,23 @@ def read_curve(gpu, gpu_name: str = "") -> tuple[Optional[CurveState], str]:
         return None, ct_err
 
     points = []
+    in_memory = False
     for i, (freq_khz, volt_uv) in enumerate(vfp_points):
+        if freq_khz == 0 and volt_uv == 0:
+            break  # end of populated entries
+
         delta_khz = ct_entries[i][0] if i < len(ct_entries) else 0
         flags = ct_entries[i][1] if i < len(ct_entries) else 0
 
         if flags == 1:
-            # flags=1 marks the start of the memory clock domain. Stop here.
-            break
+            in_memory = True
 
         points.append(VFPoint(
             index=i,
             freq_khz=freq_khz,
             volt_uv=volt_uv,
             delta_khz=delta_khz,
+            domain="memory" if in_memory else "gpu",
         ))
 
     return CurveState(points=points, timestamp=time.time(), gpu_name=gpu_name), "OK"
@@ -198,7 +202,7 @@ def build_write_buffer(
     struct.pack_into("<I", buf, 0, (1 << 16) | CT_SIZE)
 
     # Clear mask — set only bits for points we're writing
-    for i in range(4, 4 + 16):
+    for i in range(4, 4 + 32):
         buf[i] = 0x00
 
     set_mask_bits(buf, set(point_deltas.keys()))
@@ -235,20 +239,20 @@ def write_offsets(
 
 
 def write_global_offset(gpu, delta_khz: int, dry_run: bool = False) -> tuple[int, str]:
-    """Apply a uniform frequency offset to all non-idle points."""
+    """Apply a uniform frequency offset to all GPU core points."""
     curve, err = read_curve(gpu)
     if not curve:
         return -999, f"Failed to read curve: {err}"
-    
-    point_deltas = {p.index: delta_khz for p in curve.points}
+
+    point_deltas = {p.index: delta_khz for p in curve.points if p.domain == "gpu"}
     return write_offsets(gpu, point_deltas, dry_run=dry_run)
 
 
 def reset_offsets(gpu, dry_run: bool = False) -> tuple[int, str]:
-    """Zero all frequency offsets."""
+    """Zero all GPU core frequency offsets."""
     curve, err = read_curve(gpu)
     if not curve:
         return -999, f"Failed to read curve: {err}"
 
-    point_deltas = {p.index: 0 for p in curve.points}
+    point_deltas = {p.index: 0 for p in curve.points if p.domain == "gpu"}
     return write_offsets(gpu, point_deltas, dry_run=dry_run)

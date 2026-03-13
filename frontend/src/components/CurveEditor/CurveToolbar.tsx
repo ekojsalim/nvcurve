@@ -11,9 +11,11 @@ interface Props {
   onResetZoom: () => void;
   /** True if the chart is currently zoomed in */
   isZoomed: boolean;
+  /** True when viewing a read-only domain (memory) */
+  readOnly?: boolean;
 }
 
-export function CurveToolbar({ onRefresh, activePts, onResetZoom, isZoomed }: Props) {
+export function CurveToolbar({ onRefresh, activePts, onResetZoom, isZoomed, readOnly }: Props) {
   const { pendingDeltas, stageRangeEdit } = useCurveStore();
 
   const [offsetMhz, setOffsetMhz] = useState(0);
@@ -60,8 +62,8 @@ export function CurveToolbar({ onRefresh, activePts, onResetZoom, isZoomed }: Pr
       {/* Divider */}
       <span className="w-px h-6 bg-zinc-800 mx-1" />
 
-      {/* Global offset slider */}
-      {uniformDeltaMhz !== null && (
+      {/* Global offset slider — GPU only */}
+      {!readOnly && uniformDeltaMhz !== null && (
         <div className="flex items-center gap-1.5 min-w-[260px]">
           <span className="text-zinc-500 text-xs whitespace-nowrap">Global Offset</span>
           <input

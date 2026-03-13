@@ -21,6 +21,7 @@ export default function App() {
   const { setCurve, activeProfile, setActiveProfile } = useCurveStore();
 
   const [activeTab, setActiveTab] = useState<'curve' | 'performance'>('curve');
+  const [activeDomain, setActiveDomain] = useState<'gpu' | 'memory'>('gpu');
   const [isProfileOpen, setIsProfileOpen] = useState(false);
   const profileRef = useRef<HTMLDivElement>(null);
 
@@ -113,6 +114,8 @@ export default function App() {
                   {curve ? (
                     <CurveEditor
                       curve={curve}
+                      activeDomain={activeDomain}
+                      onDomainChange={setActiveDomain}
                       currentVoltageMv={currentVoltageMv}
                       currentClockMhz={monitor?.clock_mhz ?? null}
                       onRefresh={handleRefresh}
@@ -131,7 +134,11 @@ export default function App() {
               
               {curve && (
                 <div className="w-full">
-                  <PointTable points={curve.points} currentVoltageMv={currentVoltageMv} />
+                  <PointTable
+                    points={curve.points.filter(p => p.domain === activeDomain)}
+                    currentVoltageMv={activeDomain === 'gpu' ? currentVoltageMv : null}
+                    readOnly={activeDomain === 'memory'}
+                  />
                 </div>
               )}
             </>

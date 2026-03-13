@@ -7,9 +7,10 @@ import { useCurveStore } from '../../store/curveStore';
 interface Props {
   points: VFPoint[];
   currentVoltageMv: number | null;
+  readOnly?: boolean;
 }
 
-export function PointTable({ points, currentVoltageMv }: Props) {
+export function PointTable({ points, currentVoltageMv, readOnly }: Props) {
   const { pendingDeltas, selectedPoints, selectPoint, selectRange } = useCurveStore();
   const currentPoint = findCurrentPoint(points, currentVoltageMv);
   const clampedPoints = useMemo(() => detectClampedPoints(points), [points]);
@@ -26,13 +27,16 @@ export function PointTable({ points, currentVoltageMv }: Props) {
     <div className="bg-zinc-900 rounded-lg overflow-hidden flex flex-col">
       <div className="flex items-center gap-2 px-3 py-2 border-b border-zinc-800 shrink-0">
         <span className="text-xs text-zinc-500 uppercase tracking-wider mr-2">Points</span>
-        {pendingDeltas.size > 0 && (
+        {!readOnly && pendingDeltas.size > 0 && (
           <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-cyan-500/15 border border-cyan-500/30 text-cyan-400 text-xs">
             {pendingDeltas.size} staged
           </span>
         )}
+        {readOnly && (
+          <span className="text-xs text-zinc-600 italic">read-only</span>
+        )}
         <span className="ml-auto text-xs text-zinc-600">{points.length} points</span>
-        {selectedPoints.size === 1 && (
+        {!readOnly && selectedPoints.size === 1 && (
           <div className="flex gap-1 ml-4 border-l border-zinc-800 pl-4">
             <button
               onClick={() => {
@@ -78,7 +82,7 @@ export function PointTable({ points, currentVoltageMv }: Props) {
                 isClamped={clampedPoints.has(p.index)}
                 pendingDeltaKhz={pendingDeltas.get(p.index)}
                 shouldAutoScroll={selectedPoints.size === 1 && selectedPoints.has(p.index)}
-                onMouseDown={(e) => {
+                onMouseDown={readOnly ? undefined : (e) => {
                   if (e.shiftKey) {
                     const currentSelected = Array.from(selectedPoints);
                     if (currentSelected.length > 0) {
@@ -97,7 +101,7 @@ export function PointTable({ points, currentVoltageMv }: Props) {
                     selectPoint(p.index, false);
                   }
                 }}
-                onMouseEnter={() => {
+                onMouseEnter={readOnly ? undefined : () => {
                   if (dragStartIdx !== null) {
                     const min = Math.min(dragStartIdx, p.index);
                     const max = Math.max(dragStartIdx, p.index);

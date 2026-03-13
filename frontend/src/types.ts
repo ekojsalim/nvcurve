@@ -8,6 +8,7 @@ export interface VFPoint {
   delta_mhz: number;
   effective_freq_khz: number;
   effective_freq_mhz: number;
+  domain: 'gpu' | 'memory';
 }
 
 export interface CurveState {

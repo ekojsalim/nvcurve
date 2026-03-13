@@ -105,6 +105,7 @@ def _vfpoint_dict(p) -> dict:
         "delta_mhz": p.delta_mhz,
         "effective_freq_khz": p.effective_freq_khz,
         "effective_freq_mhz": p.effective_freq_mhz,
+        "domain": p.domain,
     }
 
 
@@ -667,7 +668,7 @@ async def api_curve_write_global(req: GlobalOffsetRequest):
     if not vfp_state:
         raise HTTPException(status_code=500, detail="Failed to read curve")
 
-    all_deltas = {p.index: req.delta_khz for p in vfp_state.points}
+    all_deltas = {p.index: req.delta_khz for p in vfp_state.points if p.domain == "gpu"}
     effective_limit = req.max_delta_khz if req.max_delta_khz is not None else cfg.max_delta_khz
     errors = validate_write(all_deltas, effective_limit)
     if errors:

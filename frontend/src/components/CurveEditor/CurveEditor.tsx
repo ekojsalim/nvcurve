@@ -10,6 +10,8 @@ import { useCurveStore } from '../../store/curveStore';
 
 interface Props {
   curve: CurveState;
+  activeDomain: 'gpu' | 'memory';
+  onDomainChange: (d: 'gpu' | 'memory') => void;
   currentVoltageMv: number | null;
   currentClockMhz: number | null;
   onRefresh: () => void;
@@ -34,7 +36,8 @@ interface DragInfo {
 /** Box-select rubber-band rect (SVG inner coords) */
 interface BoxRect { x0: number; y0: number; x1: number; y1: number }
 
-export function CurveEditor({ curve, currentVoltageMv, currentClockMhz, onRefresh }: Props) {
+export function CurveEditor({ curve, activeDomain, onDomainChange, currentVoltageMv, currentClockMhz, onRefresh }: Props) {
+  const readOnly = activeDomain === 'memory';
   const [hoveredPoint, setHoveredPoint] = useState<VFPoint | null>(null);
   const [dragInfo, setDragInfo] = useState<DragInfo | null>(null);
   const [boxRect, setBoxRect] = useState<BoxRect | null>(null);
@@ -88,8 +91,17 @@ export function CurveEditor({ curve, currentVoltageMv, currentClockMhz, onRefres
     }
   }
 
-  const pts = curve.points;
-  const clampedPoints = useMemo(() => detectClampedPoints(curve.points), [curve.points]);
+  const pts = useMemo(
+    () => curve.points.filter(p => p.domain === activeDomain),
+    [curve.points, activeDomain],
+  );
+  const clampedPoints = useMemo(() => detectClampedPoints(pts), [pts]);
+
+  // Clear selection and pending when switching domains
+  useEffect(() => {
+    clearSelection();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeDomain]);
 
   // ─── X-axis zoom / viewport ──────────────────────────────────────────────
   // Use a slightly larger padding to space things out better
@@ -194,6 +206,7 @@ export function CurveEditor({ curve, currentVoltageMv, currentClockMhz, onRefres
 
   // ─── Point mousedown → start drag ────────────────────────────────────────
   function handlePointMouseDown(e: React.MouseEvent, p: VFPoint) {
+    if (readOnly) return;
     containerRef.current?.focus();
     e.stopPropagation();
     e.preventDefault();
@@ -430,39 +443,64 @@ export function CurveEditor({ curve, currentVoltageMv, currentClockMhz, onRefres
 
   return (
     <div className="bg-zinc-900 rounded-lg overflow-hidden flex flex-col h-full">
-      {/* Header: title + action buttons */}
+      {/* Header: title + domain toggle + action buttons */}
       <div className="flex items-center justify-between px-3 py-2 border-b border-zinc-800 shrink-0">
-        <span className="text-xs text-zinc-500 uppercase tracking-wider font-semibold">V/F Curve</span>
+        <div className="flex items-center gap-3">
+          <span className="text-xs text-zinc-500 uppercase tracking-wider font-semibold">V/F Curve</span>
+          {/* Domain toggle */}
+          <div className="flex rounded overflow-hidden border border-zinc-700 text-xs">
+            {(['gpu', 'memory'] as const).map((d) => (
+              <button
+                key={d}
+                onClick={() => onDomainChange(d)}
+                className={`px-2.5 py-0.5 capitalize transition-colors ${
+                  activeDomain === d
+                    ? 'bg-zinc-700 text-zinc-100'
+                    : 'bg-zinc-900 text-zinc-500 hover:text-zinc-300'
+                }`}
+              >
+                {d}
+              </button>
+            ))}
+          </div>
+          {readOnly && (
+            <span className="text-xs text-zinc-500 italic">read-only</span>
+          )}
+        </div>
         <div className="flex items-center gap-2">
-          {hasPending && (
+          {!readOnly && hasPending && (
             <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-cyan-500/15 border border-cyan-500/30 text-cyan-400 text-xs">
               {pendingDeltas.size} pending
             </span>
           )}
-          <button
-            onClick={() => setDialog('apply')}
-            disabled={!hasPending || busy}
-            className="flex items-center gap-1.5 px-2 py-1 rounded bg-emerald-700 hover:bg-emerald-600 text-white text-xs font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            <Check size={12} />
-            Apply
-          </button>
-          <button
-            onClick={() => discardEdits()}
-            disabled={!hasPending || busy}
-            className="flex items-center gap-1.5 px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            <X size={12} />
-            Discard
-          </button>
-          <button
-            onClick={() => setDialog('reset')}
-            disabled={busy}
-            className="flex items-center gap-1.5 px-2 py-1 rounded bg-zinc-800 hover:bg-red-900 text-zinc-400 hover:text-red-300 text-xs transition-colors"
-          >
-            <RotateCcw size={12} />
-            Reset
-          </button>
+          {!readOnly && (
+            <>
+              <button
+                onClick={() => setDialog('apply')}
+                disabled={!hasPending || busy}
+                className="flex items-center gap-1.5 px-2 py-1 rounded bg-emerald-700 hover:bg-emerald-600 text-white text-xs font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                <Check size={12} />
+                Apply
+              </button>
+              <button
+                onClick={() => discardEdits()}
+                disabled={!hasPending || busy}
+                className="flex items-center gap-1.5 px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                <X size={12} />
+                Discard
+              </button>
+              <button
+                onClick={() => setDialog('reset')}
+                disabled={busy}
+                className="flex items-center gap-1.5 px-2 py-1 rounded bg-zinc-800 hover:bg-red-900 text-zinc-400 hover:text-red-300 text-xs transition-colors"
+              >
+                <RotateCcw size={12} />
+                Reset
+              </button>
+            </>
+          )}
         </div>
       </div>
 
@@ -506,6 +544,7 @@ export function CurveEditor({ curve, currentVoltageMv, currentClockMhz, onRefres
           activePts={pts}
           onResetZoom={() => setXViewport(voltExtent(pts))}
           isZoomed={Math.abs((xViewport[1] - xViewport[0]) - (voltExtent(pts)[1] - voltExtent(pts)[0])) > 5}
+          readOnly={readOnly}
         />
       </div>
 
@@ -654,26 +693,22 @@ export function CurveEditor({ curve, currentVoltageMv, currentClockMhz, onRefres
                 />
               )}
 
-              {/* Current voltage crosshair */}
-              {currentVoltageMv != null && xScale(currentVoltageMv) >= 0 && xScale(currentVoltageMv) <= INNER_W && (
+              {/* Current voltage / clock crosshairs — GPU domain only */}
+              {!readOnly && currentVoltageMv != null && xScale(currentVoltageMv) >= 0 && xScale(currentVoltageMv) <= INNER_W && (
                 <line
                   x1={xScale(currentVoltageMv)} x2={xScale(currentVoltageMv)}
                   y1={0} y2={INNER_H}
                   stroke="#facc15" strokeWidth={0.5} strokeDasharray="4 4" strokeOpacity={0.3}
                 />
               )}
-
-              {/* Current clock crosshair */}
-              {currentClockMhz != null && yScale(currentClockMhz) >= 0 && yScale(currentClockMhz) <= INNER_H && (
+              {!readOnly && currentClockMhz != null && yScale(currentClockMhz) >= 0 && yScale(currentClockMhz) <= INNER_H && (
                 <line
                   x1={0} x2={INNER_W}
                   y1={yScale(currentClockMhz)} y2={yScale(currentClockMhz)}
                   stroke="#facc15" strokeWidth={0.5} strokeDasharray="4 4" strokeOpacity={0.3}
                 />
               )}
-
-              {/* Current operating point marker */}
-              {currentVoltageMv != null && currentClockMhz != null &&
+              {!readOnly && currentVoltageMv != null && currentClockMhz != null &&
                 xScale(currentVoltageMv) >= 0 && xScale(currentVoltageMv) <= INNER_W &&
                 yScale(currentClockMhz) >= 0 && yScale(currentClockMhz) <= INNER_H && (
                   <circle
@@ -707,9 +742,9 @@ export function CurveEditor({ curve, currentVoltageMv, currentClockMhz, onRefres
                 const isSelected = selectedPoints.has(p.index);
                 const isDragging = dragInfo?.pointIndex === p.index;
 
-                let fill = '#34d399';
-                if (hasPendingEdit && !isSelected) fill = '#22d3ee';
-                if (isSelected) fill = '#22d3ee';
+                let fill = readOnly ? '#6366f1' : '#34d399';
+                if (!readOnly && hasPendingEdit && !isSelected) fill = '#22d3ee';
+                if (!readOnly && isSelected) fill = '#22d3ee';
 
                 // Tweaked radius for less bloated flat regions
                 const r = isDragging ? 5.5 : isHovered || isSelected || hasPendingEdit ? 4.5 : 2.5;
@@ -717,30 +752,31 @@ export function CurveEditor({ curve, currentVoltageMv, currentClockMhz, onRefres
                 return (
                   <g key={p.index}>
                     {/* Dim ring at confirmed position (only visible when there's a pending edit) */}
-                    {ghostCy !== null && Math.abs(ghostCy - mainCy) > 0.5 && (
+                    {!readOnly && ghostCy !== null && Math.abs(ghostCy - mainCy) > 0.5 && (
                       <circle cx={cx} cy={ghostCy} r={3}
                         fill="none" stroke="#34d399" strokeWidth={1} strokeOpacity={0.4} />
                     )}
 
                     {/* Drop-line from confirmed → pending while dragging */}
-                    {isDragging && ghostCy !== null && Math.abs(ghostCy - mainCy) > 1 && (
+                    {!readOnly && isDragging && ghostCy !== null && Math.abs(ghostCy - mainCy) > 1 && (
                       <line x1={cx} y1={ghostCy} x2={cx} y2={mainCy}
                         stroke="#22d3ee" strokeWidth={1} strokeDasharray="3 2" strokeOpacity={0.5} />
                     )}
 
-                    {/* Main interactive circle — at pending position if staged, otherwise confirmed */}
+                    {/* Main circle */}
                     <circle
                       cx={cx}
                       cy={mainCy}
                       r={r}
                       fill={fill}
-                      stroke={isDragging ? '#fff' : isSelected ? '#fff' : isHovered ? '#fff' : 'none'}
+                      fillOpacity={readOnly ? 0.7 : 1}
+                      stroke={!readOnly && (isDragging || isSelected || isHovered) ? '#fff' : 'none'}
                       strokeWidth={isDragging ? 2 : isSelected ? 2 : 1}
-                      style={{ cursor: 'ns-resize', transition: 'r 0.08s' }}
+                      style={{ cursor: readOnly ? 'default' : 'ns-resize', transition: 'r 0.08s' }}
                       onMouseEnter={() => handleMouseEnter(p)}
                       onMouseLeave={handleMouseLeave}
-                      onMouseDown={(e) => handlePointMouseDown(e, p)}
-                      onClick={(e) => {
+                      onMouseDown={readOnly ? undefined : (e) => handlePointMouseDown(e, p)}
+                      onClick={readOnly ? undefined : (e) => {
                         if (dragMoved.current) return;
                         selectPoint(p.index, e.shiftKey);
                       }}
