@@ -30,7 +30,7 @@ FUNC = {
 VFP_SIZE   = 0x1C28   # 7208 bytes
 VFP_BASE   = 0x48
 VFP_STRIDE = 0x1C     # 28 bytes
-VFP_POINTS = 128
+VFP_POINTS = (VFP_SIZE - VFP_BASE) // VFP_STRIDE
 
 # ── Get/SetClockBoostTable (0x23F1B133 / 0x0733E009) ────────────────────────
 # 128 × 36-byte entries at offset 0x44; freqDelta (int32, kHz) at entry+0x14.
@@ -40,7 +40,7 @@ CT_SIZE      = 0x2420  # 9248 bytes
 CT_BASE      = 0x44
 CT_STRIDE    = 0x24    # 36 bytes
 CT_DELTA_OFF = 0x14    # freqDelta offset within entry
-CT_POINTS    = 255     # Max capacity in modern drivers
+CT_POINTS    = (CT_SIZE - CT_BASE) // CT_STRIDE
 
 # ── Other struct sizes ───────────────────────────────────────────────────────
 

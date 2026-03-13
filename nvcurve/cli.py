@@ -164,7 +164,7 @@ def output_json(gpu_name, points, offsets, voltage):
 
 def run_diagnostics(gpu, gpu_name):
     """Probe all known NvAPI functions and report results."""
-    from .hal.vfcurve import fill_mask_128
+    from .hal.vfcurve import get_boost_mask
     from .nvapi.bootstrap import nvcall, query_interface
     from .nvapi.constants import FUNC, MASK_SIZE, VOLT_SIZE, RANGES_SIZE, PERF_SIZE, VBOOST_SIZE
 
@@ -189,15 +189,23 @@ def run_diagnostics(gpu, gpu_name):
         resolved = "resolved" if ptr else "NOT FOUND"
         print(f"  {name:30s}  0x{fid:08X}  size=0x{size:04X}  ver={ver}  {resolved}")
 
+    mask_bytes = None
+    mask_err = ""
     print()
     print("=== Read function tests ===")
+    
+    mask_bytes, mask_err = get_boost_mask(gpu)
+    if not mask_bytes:
+        print(f"  WARNING: Failed to get boost mask: {mask_err}")
+
     for name, fid, size, ver, needs_mask in probes:
         if name.startswith("Set"):
             continue
 
-        def fill(buf, _nm=needs_mask, _fid=fid):
-            if _nm:
-                fill_mask_128(buf)
+        def fill(buf, _nm=needs_mask, _fid=fid, _mask=mask_bytes):
+            if _nm and _mask:
+                for i in range(32):
+                    buf[4 + i] = _mask[i]
             if _fid == FUNC["GetVFPCurve"]:
                 struct.pack_into("<I", buf, 0x14, 15)
 
@@ -353,7 +361,7 @@ def cmd_read(args, client: NvCurveClient):
     if args.raw:
         require_root()
         from .hal.gpu import get_gpu
-        from .hal.vfcurve import read_clock_table_raw, fill_mask_128
+        from .hal.vfcurve import read_clock_table_raw, get_boost_mask
         from .hal.monitoring import read_voltage
         from .nvapi.bootstrap import nvcall
         from .nvapi.constants import FUNC
@@ -361,8 +369,11 @@ def cmd_read(args, client: NvCurveClient):
 
         print(f"GPU: {gpu_name}")
 
+        mask_bytes, _ = get_boost_mask(gpu)
         def fill_vfp(buf):
-            fill_mask_128(buf)
+            if mask_bytes:
+                for i in range(32):
+                    buf[4 + i] = mask_bytes[i]
             struct.pack_into("<I", buf, 0x14, 15)
 
         vfp_raw, _ = nvcall(FUNC["GetVFPCurve"], gpu, VFP_SIZE, ver=1, pre_fill=fill_vfp)
@@ -944,7 +955,7 @@ def build_parser() -> argparse.ArgumentParser:
 Examples:
   %(prog)s                               Launch web UI (default)
   %(prog)s read                          Condensed V/F curve
-  %(prog)s read --full                   All 128 points
+  %(prog)s read --full                   All points
   %(prog)s read --json                   JSON output
   %(prog)s write --global --delta 50     +50 MHz to all points
   %(prog)s write --point 80 --delta 100  +100 MHz to point 80
@@ -968,7 +979,7 @@ Examples:
 
     # read
     p_read = sub.add_parser("read", help="Read V/F curve")
-    p_read.add_argument("--full", action="store_true", help="Show all 128 points")
+    p_read.add_argument("--full", action="store_true", help="Show all points")
     p_read.add_argument("--json", action="store_true", help="JSON output")
     p_read.add_argument("--raw", action="store_true",
                         help="Raw hex dumps of hardware buffers (needs root)")

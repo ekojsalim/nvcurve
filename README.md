@@ -165,7 +165,7 @@ The CLI is suited for scripting, headless systems, or quick one-off operations. 
 
 ```bash
 nvcurve read                   # Condensed V/F curve
-nvcurve read --full            # All 128 points
+nvcurve read --full            # All points
 nvcurve read --json            # JSON output
 ```
 

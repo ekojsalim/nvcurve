@@ -15,14 +15,23 @@ from ..nvapi.types import VFPoint, CurveState
 
 # ── Mask helpers ─────────────────────────────────────────────────────────────
 
-def fill_mask_128(buf, offset: int = 4, nbytes: int = 16) -> None:
-    """Set all 128 bits in the mask field (request all points)."""
-    for i in range(offset, offset + nbytes):
-        buf[i] = 0xFF
+def get_boost_mask(gpu) -> tuple[Optional[bytes], str]:
+    """Read the canonical 32-byte clock boost mask from the driver.
+    
+    Returns (mask_bytes, "OK") or (None, error).
+    """
+    from ..nvapi.constants import MASK_SIZE
+    def fill(b):
+        for i in range(4, 4 + 32):
+            b[i] = 0xFF
+    d, err = nvcall(FUNC["GetClockBoostMask"], gpu, MASK_SIZE, ver=1, pre_fill=fill)
+    if d and len(d) >= 36:
+        return d[4:36], "OK"
+    return None, err
 
 
 def set_mask_bit(buf, point: int, offset: int = 4) -> None:
-    """Set a single bit in the 128-bit mask for one point."""
+    """Set a single bit in the 256-bit mask for one point."""
     byte_idx = offset + (point // 8)
     bit_idx = point % 8
     buf[byte_idx] = int.from_bytes(buf[byte_idx:byte_idx + 1], "little") | (1 << bit_idx)
@@ -41,8 +50,13 @@ def read_vfp_curve(gpu) -> tuple[Optional[list[tuple[int, int]]], str]:
 
     Returns ([(freq_kHz, volt_uV), ...], "OK") or (None, error).
     """
+    mask, mask_err = get_boost_mask(gpu)
+    if not mask:
+        return None, f"GetClockBoostMask failed: {mask_err}"
+
     def fill(buf):
-        fill_mask_128(buf)
+        for i in range(32):
+            buf[4 + i] = mask[i]
         struct.pack_into("<I", buf, 0x14, 15)
 
     d, err = nvcall(FUNC["GetVFPCurve"], gpu, VFP_SIZE, ver=1, pre_fill=fill)
@@ -65,8 +79,13 @@ def read_clock_table_raw(gpu) -> tuple[Optional[bytes], str]:
     Used for snapshots, inspection, and as the baseline for writes.
     Returns (bytes, "OK") or (None, error).
     """
+    mask, mask_err = get_boost_mask(gpu)
+    if not mask:
+        return None, f"GetClockBoostMask failed: {mask_err}"
+
     def fill(buf):
-        fill_mask_128(buf)
+        for i in range(32):
+            buf[4 + i] = mask[i]
 
     return nvcall(FUNC["GetClockBoostTable"], gpu, CT_SIZE, ver=1, pre_fill=fill)
 
