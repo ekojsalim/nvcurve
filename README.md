@@ -141,7 +141,7 @@ nvcurve service restart
 | Tab / Shift+Tab | Step through points one by one |
 | Shift+drag on background | Box select; draw a rubber-band rectangle |
 | Drag on background | Pan the X axis |
-| Ctrl/Cmd+scroll | Zoom X axis around the cursor |
+| Alt+scroll | Zoom X axis around the cursor |
 
 ### Point table
 

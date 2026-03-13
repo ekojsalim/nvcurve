@@ -1,10 +1,9 @@
 import { useState, useMemo, useEffect } from 'react';
-import { RefreshCw, Search } from 'lucide-react';
+import { ZoomIn, RotateCcw } from 'lucide-react';
 import { useCurveStore } from '../../store/curveStore';
 import type { VFPoint } from '../../types';
 
 interface Props {
-  onRefresh: () => void;
   /** All curve points — used by global offset slider */
   activePts: VFPoint[];
   /** Called to reset the x-axis zoom to default */
@@ -13,9 +12,13 @@ interface Props {
   isZoomed: boolean;
   /** True when viewing a read-only domain (memory) */
   readOnly?: boolean;
+  /** Current zoom factor (1 = no zoom) */
+  zoomFactor: number;
+  /** Called when user changes zoom via slider */
+  onZoomChange: (factor: number) => void;
 }
 
-export function CurveToolbar({ onRefresh, activePts, onResetZoom, isZoomed, readOnly }: Props) {
+export function CurveToolbar({ activePts, onResetZoom, isZoomed, readOnly, zoomFactor, onZoomChange }: Props) {
   const { pendingDeltas, stageRangeEdit } = useCurveStore();
 
   const [offsetMhz, setOffsetMhz] = useState(0);
@@ -40,24 +43,31 @@ export function CurveToolbar({ onRefresh, activePts, onResetZoom, isZoomed, read
 
   return (
     <div className="flex flex-wrap items-center gap-2 px-1 pb-2">
-      {/* View controls */}
-      <button
-        onClick={onRefresh}
-        className="flex items-center gap-1.5 px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs transition-colors"
-      >
-        <RefreshCw size={12} />
-        Refresh
-      </button>
-      {isZoomed && (
-        <button
-          onClick={onResetZoom}
-          className="flex items-center gap-1.5 px-2 py-1 rounded bg-cyan-900/50 hover:bg-cyan-800/60 border border-cyan-700/50 text-cyan-300 text-xs transition-colors"
-          title="Reset x-axis zoom (Ctrl+scroll to zoom)"
-        >
-          <Search size={12} />
-          Reset Zoom
-        </button>
-      )}
+      {/* Zoom control */}
+      <div className="flex items-center gap-1.5 px-2 py-1 rounded bg-zinc-800/60 border border-zinc-700/40" title="Zoom x-axis (Alt+scroll also works)">
+        <ZoomIn size={11} className="text-zinc-500 shrink-0" />
+        <input
+          type="range"
+          min={1}
+          max={10}
+          step={0.1}
+          value={zoomFactor}
+          onChange={(e) => onZoomChange(Number(e.target.value))}
+          className="w-20 h-1 cursor-pointer accent-cyan-400"
+        />
+        <span className={`text-xs font-mono w-8 tabular-nums ${isZoomed ? 'text-cyan-400' : 'text-zinc-600'}`}>
+          {zoomFactor.toFixed(1)}×
+        </span>
+        {isZoomed && (
+          <button
+            onClick={onResetZoom}
+            title="Reset zoom"
+            className="text-zinc-500 hover:text-zinc-300 transition-colors ml-0.5"
+          >
+            <RotateCcw size={11} />
+          </button>
+        )}
+      </div>
 
       {/* Divider */}
       <span className="w-px h-6 bg-zinc-800 mx-1" />

@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
-import { Check, X, RotateCcw } from 'lucide-react';
+import { Check, X, RotateCcw, RefreshCw } from 'lucide-react';
 import { scaleLinear } from 'd3';
 import type { VFPoint, CurveState } from '../../types';
 import { CurveTooltip } from './CurveTooltip';
@@ -18,10 +18,6 @@ interface Props {
 }
 
 const MARGIN = { top: 16, right: 24, bottom: 48, left: 64 };
-const SVG_W = 680;
-const SVG_H = 460;
-const INNER_W = SVG_W - MARGIN.left - MARGIN.right;
-const INNER_H = SVG_H - MARGIN.top - MARGIN.bottom;
 
 /** Drag-tooltip info (shown while actively dragging a point) */
 interface DragInfo {
@@ -44,6 +40,32 @@ export function CurveEditor({ curve, activeDomain, onDomainChange, currentVoltag
   const [inlineInput, setInlineInput] = useState<{ pointIndex: number; value: string } | null>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const [svgCursor, setSvgCursor] = useState<string>('default');
+
+  // ─── Dynamic SVG dimensions ──────────────────────────────────────────────
+  const [svgW, setSvgW] = useState(680);
+  const svgWRef = useRef(680);
+  svgWRef.current = svgW;
+  const INNER_W = svgW - MARGIN.left - MARGIN.right;
+
+  const [svgH, setSvgH] = useState(460);
+  const svgHRef = useRef(460);
+  svgHRef.current = svgH;
+  const INNER_H = svgH - MARGIN.top - MARGIN.bottom;
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(entries => {
+      const { width, height } = entries[0].contentRect;
+      const w = Math.round(width);
+      const h = Math.min(Math.round(height), 500, Math.round(window.innerHeight * 0.58));
+      setSvgW(prev => prev === w ? prev : Math.max(300, w));
+      setSvgH(prev => prev === h ? prev : Math.max(200, h));
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   // Store
   const {
@@ -124,11 +146,28 @@ export function CurveEditor({ curve, activeDomain, onDomainChange, currentVoltag
   const yScale = scaleLinear().domain([freqMin, freqMax]).range([INNER_H, 0]);
 
   // Keep scales in a ref so event handler closures always see the latest
-  const scalesRef = useRef({ xScale, yScale, xViewport });
-  scalesRef.current = { xScale, yScale, xViewport };
+  const scalesRef = useRef({ xScale, yScale, xViewport, innerW: INNER_W });
+  scalesRef.current = { xScale, yScale, xViewport, innerW: INNER_W };
 
   const xTicks = xScale.ticks(8);
   const yTicks = yScale.ticks(6);
+
+  // ─── Zoom factor (for toolbar slider) ────────────────────────────────────
+  const [fullExtentMin, fullExtentMax] = voltExtent(pts);
+  const fullWidth = (fullExtentMax - fullExtentMin) + 80;
+  const currentWidth = xViewport[1] - xViewport[0];
+  const zoomFactor = Math.max(1, Math.min(10, fullWidth / currentWidth));
+
+  function handleZoomChange(factor: number) {
+    const pad = 40;
+    const newWidth = Math.max(20, fullWidth / factor);
+    const center = (xViewport[0] + xViewport[1]) / 2;
+    let newMin = center - newWidth / 2;
+    let newMax = center + newWidth / 2;
+    if (newMin < fullExtentMin - pad) { newMin = fullExtentMin - pad; newMax = newMin + newWidth; }
+    if (newMax > fullExtentMax + pad) { newMax = fullExtentMax + pad; newMin = newMax - newWidth; }
+    setXViewport([newMin, newMax]);
+  }
 
   // Polylines
   const visiblePts = pts.filter((p) => {
@@ -158,8 +197,8 @@ export function CurveEditor({ curve, activeDomain, onDomainChange, currentVoltag
     if (!svg || !container) return null;
     const svgRect = svg.getBoundingClientRect();
     const containerRect = container.getBoundingClientRect();
-    const scaleX = svgRect.width / SVG_W;
-    const scaleY = svgRect.height / SVG_H;
+    const scaleX = svgRect.width / svgWRef.current;
+    const scaleY = svgRect.height / svgHRef.current;
     return {
       x: svgRect.left - containerRect.left + (svgX + MARGIN.left) * scaleX,
       y: svgRect.top - containerRect.top + (svgY + MARGIN.top) * scaleY,
@@ -171,9 +210,20 @@ export function CurveEditor({ curve, activeDomain, onDomainChange, currentVoltag
     if (!svg) return null;
     const rect = svg.getBoundingClientRect();
     return {
-      x: (clientX - rect.left) * (SVG_W / rect.width) - MARGIN.left,
-      y: (clientY - rect.top) * (SVG_H / rect.height) - MARGIN.top,
+      x: (clientX - rect.left) * (svgWRef.current / rect.width) - MARGIN.left,
+      y: (clientY - rect.top) * (svgHRef.current / rect.height) - MARGIN.top,
     };
+  }
+
+  // ─── SVG cursor ──────────────────────────────────────────────────────────
+  function handleSvgMouseMove(e: React.MouseEvent) {
+    if (isPanning.current) return;
+    const next = e.shiftKey ? 'crosshair' : 'default';
+    setSvgCursor(c => c === next ? c : next);
+  }
+
+  function handleSvgMouseLeave() {
+    if (!isPanning.current) setSvgCursor('default');
   }
 
   // ─── Point hover ─────────────────────────────────────────────────────────
@@ -258,13 +308,14 @@ export function CurveEditor({ curve, activeDomain, onDomainChange, currentVoltag
     } else {
       // Plain drag = pan
       isPanning.current = true;
+      setSvgCursor('grabbing');
       panState.current = { startX: inner.x, startY: inner.y, startViewport: [...scalesRef.current.xViewport] as [number, number] };
     }
   }
 
-  // ─── Scroll wheel → zoom x-axis around cursor (Ctrl/Meta + scroll only) ──
+  // ─── Scroll wheel → zoom x-axis around cursor (Alt + scroll) ────────────
   function handleWheel(e: React.WheelEvent) {
-    if (!e.ctrlKey && !e.metaKey) return; // plain scroll → let page scroll normally
+    if (!e.altKey) return; // plain scroll → let page scroll normally
     e.preventDefault();
     const inner = clientToInner(e.clientX, e.clientY);
     if (!inner) return;
@@ -341,7 +392,7 @@ export function CurveEditor({ curve, activeDomain, onDomainChange, currentVoltag
         if (!inner) return;
         const ps = panState.current;
         // How many volts does 1 SVG-inner-px correspond to?
-        const voltPerPx = (ps.startViewport[1] - ps.startViewport[0]) / INNER_W;
+        const voltPerPx = (ps.startViewport[1] - ps.startViewport[0]) / scalesRef.current.innerW;
         const dxVolt = (inner.x - ps.startX) * voltPerPx;
         const [fullMin, fullMax] = voltExtent(pts);
         const pad = 20;
@@ -379,6 +430,7 @@ export function CurveEditor({ curve, activeDomain, onDomainChange, currentVoltag
       // --- End pan ---
       if (isPanning.current) {
         isPanning.current = false;
+        setSvgCursor('default');
         if (panState.current) {
           const inner = clientToInner(e.clientX, e.clientY);
           if (inner) {
@@ -449,17 +501,17 @@ export function CurveEditor({ curve, activeDomain, onDomainChange, currentVoltag
           <span className="text-xs text-zinc-500 uppercase tracking-wider font-semibold">V/F Curve</span>
           {/* Domain toggle */}
           <div className="flex rounded overflow-hidden border border-zinc-700 text-xs">
-            {(['gpu', 'memory'] as const).map((d) => (
+            {([{label: 'GPU', value: 'gpu'}, {label: 'Memory', value: 'memory'}] as const).map((d) => (
               <button
-                key={d}
-                onClick={() => onDomainChange(d)}
+                key={d.value}
+                onClick={() => onDomainChange(d.value)}
                 className={`px-2.5 py-0.5 capitalize transition-colors ${
-                  activeDomain === d
+                  activeDomain === d.value
                     ? 'bg-zinc-700 text-zinc-100'
                     : 'bg-zinc-900 text-zinc-500 hover:text-zinc-300'
                 }`}
               >
-                {d}
+                {d.label}
               </button>
             ))}
           </div>
@@ -501,6 +553,13 @@ export function CurveEditor({ curve, activeDomain, onDomainChange, currentVoltag
               </button>
             </>
           )}
+          <button
+            onClick={onRefresh}
+            className="flex items-center gap-1.5 px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs transition-colors"
+          >
+            <RefreshCw size={12} />
+            Refresh
+          </button>
         </div>
       </div>
 
@@ -540,18 +599,18 @@ export function CurveEditor({ curve, activeDomain, onDomainChange, currentVoltag
 
       <div className="px-3 pt-3">
         <CurveToolbar
-          onRefresh={onRefresh}
           activePts={pts}
           onResetZoom={() => setXViewport(voltExtent(pts))}
           isZoomed={Math.abs((xViewport[1] - xViewport[0]) - (voltExtent(pts)[1] - voltExtent(pts)[0])) > 5}
           readOnly={readOnly}
+          zoomFactor={zoomFactor}
+          onZoomChange={handleZoomChange}
         />
       </div>
 
       {/* Need tabIndex=0 to capture keyboard events */}
-      <div className="flex-1 min-h-0 relative focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500/50 px-3 pb-3"
+      <div className="flex-1 min-h-0 relative focus:outline-none px-3 pt-2 pb-3 flex flex-col justify-center"
         ref={containerRef}
-        style={{ maxHeight: '600px' }}
         tabIndex={0}
         onKeyDown={(e) => {
           if (inlineInput) {
@@ -627,12 +686,14 @@ export function CurveEditor({ curve, activeDomain, onDomainChange, currentVoltag
       >
         <svg
           ref={svgRef}
-          viewBox={`0 0 ${SVG_W} ${SVG_H}`}
+          viewBox={`0 0 ${svgW} ${svgH}`}
           width="100%"
-          height="100%"
+          height={svgH}
           className="block"
-          style={{ fontFamily: 'monospace', maxHeight: '600px', cursor: isPanning.current ? 'grabbing' : 'grab', userSelect: 'none' }}
+          style={{ fontFamily: 'monospace', cursor: svgCursor, userSelect: 'none' }}
           onMouseDown={handleSvgMouseDown}
+          onMouseMove={handleSvgMouseMove}
+          onMouseLeave={handleSvgMouseLeave}
           onWheel={handleWheel}
         >
           <g transform={`translate(${MARGIN.left},${MARGIN.top})`}>

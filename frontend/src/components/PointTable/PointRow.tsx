@@ -23,7 +23,8 @@ export function PointRow({ point, isCurrent, isSelected, isClamped, pendingDelta
 
   useEffect(() => {
     if (shouldAutoScroll && trRef.current) {
-      trRef.current.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      // @ts-expect-error: the typing seems to not include the valid 'container' option
+      trRef.current.scrollIntoView({ behavior: 'smooth', block: 'nearest', container: 'nearest' });
     }
   }, [shouldAutoScroll]);
 
