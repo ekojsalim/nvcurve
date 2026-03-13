@@ -160,7 +160,7 @@ async def _monitor_poller() -> None:
         try:
             gpu = _state["gpu"]
             if gpu is not None and _state["monitor_clients"]:
-                loop = asyncio.get_event_loop()
+                loop = asyncio.get_running_loop()
                 sample = await loop.run_in_executor(
                     None, poll, gpu, _state["gpu_index"]
                 )
@@ -435,22 +435,14 @@ async def api_profile_apply(name: str):
                 errs.append("Curve: " + "; ".join(errors))
             else:
                 if cfg.auto_snapshot:
-                    await _run(snapshot_save, gpu, _state["gpu_name"], cfg.snapshot_dir)
+                    await _run(snapshot_save, gpu, _state["gpu_name"], cfg.snapshot_dir, cfg.max_snapshots)
                 ret, desc = await _run(write_offsets, gpu, deltas)
                 if ret != 0:
                     errs.append(f"Curve write failed ({ret}): {desc}")
-                else:
-                    offsets_read, _ = await _run(read_clock_offsets, gpu)
-                    _state["last_offsets"] = offsets_read
         else:
             await _run(reset_offsets, gpu)
-            offsets_read, _ = await _run(read_clock_offsets, gpu)
-            _state["last_offsets"] = offsets_read
 
-        if _state["curve_clients"]:
-            state, _ = await _run(read_curve, gpu, _state["gpu_name"])
-            if state:
-                await _broadcast(_state["curve_clients"], _curve_state_dict(state))
+        await _update_offsets_and_broadcast(gpu)
 
     if errs:
         raise HTTPException(status_code=500, detail="; ".join(errs))
@@ -537,14 +529,26 @@ async def _reapply_curve() -> None:
         return
     try:
         await _run(write_offsets, gpu, deltas)
-        offsets, _ = await _run(read_clock_offsets, gpu)
-        _state["last_offsets"] = offsets
-        if _state["curve_clients"]:
-            state, _ = await _run(read_curve, gpu, _state["gpu_name"])
-            if state:
-                await _broadcast(_state["curve_clients"], _curve_state_dict(state))
+        await _update_offsets_and_broadcast(gpu)
     except Exception as exc:
         log.warning("_reapply_curve: %s", exc)
+
+
+async def _update_offsets_and_broadcast(gpu) -> None:
+    """Re-read curve offsets, update the reconciliation baseline, and push to WS clients.
+
+    When curve WS clients are connected, a single read_curve call covers both
+    updating the baseline and the broadcast payload — avoiding a redundant
+    read_clock_offsets (ClockBoostTable) call that would otherwise happen first.
+    """
+    if _state["curve_clients"]:
+        state, _ = await _run(read_curve, gpu, _state["gpu_name"])
+        if state:
+            _state["last_offsets"] = [p.delta_khz for p in state.points]
+            await _broadcast(_state["curve_clients"], _curve_state_dict(state))
+    else:
+        offsets, _ = await _run(read_clock_offsets, gpu)
+        _state["last_offsets"] = offsets
 
 
 @app.post("/api/limits/reset")
@@ -633,21 +637,14 @@ async def api_curve_write(req: WriteRequest):
         warning = await _reconcile_check()
 
         if cfg.auto_snapshot:
-            await _run(snapshot_save, gpu, _state["gpu_name"], cfg.snapshot_dir)
+            await _run(snapshot_save, gpu, _state["gpu_name"], cfg.snapshot_dir, cfg.max_snapshots)
 
         ret, desc = await _run(write_offsets, gpu, req.deltas)
         if ret != 0:
             raise HTTPException(status_code=500, detail=f"Write failed ({ret}): {desc}")
 
         # Update baseline and push curve update to WS clients
-        offsets, _ = await _run(read_clock_offsets, gpu)
-        _state["last_offsets"] = offsets
-
-        if _state["curve_clients"]:
-            state, _ = await _run(read_curve, gpu, _state["gpu_name"])
-            if state:
-                await _broadcast(_state["curve_clients"], _curve_state_dict(state))
-
+        await _update_offsets_and_broadcast(gpu)
         _state["active_profile"] = None
 
     result = {"ok": True, "return_code": ret, "description": desc}
@@ -685,20 +682,13 @@ async def api_curve_write_global(req: GlobalOffsetRequest):
         warning = await _reconcile_check()
 
         if cfg.auto_snapshot:
-            await _run(snapshot_save, gpu, _state["gpu_name"], cfg.snapshot_dir)
+            await _run(snapshot_save, gpu, _state["gpu_name"], cfg.snapshot_dir, cfg.max_snapshots)
 
         ret, desc = await _run(write_global_offset, gpu, req.delta_khz)
         if ret != 0:
             raise HTTPException(status_code=500, detail=f"Write failed ({ret}): {desc}")
 
-        offsets, _ = await _run(read_clock_offsets, gpu)
-        _state["last_offsets"] = offsets
-
-        if _state["curve_clients"]:
-            state, _ = await _run(read_curve, gpu, _state["gpu_name"])
-            if state:
-                await _broadcast(_state["curve_clients"], _curve_state_dict(state))
-
+        await _update_offsets_and_broadcast(gpu)
         _state["active_profile"] = None
 
     result = {"ok": True, "return_code": ret, "description": desc}
@@ -719,20 +709,13 @@ async def api_curve_reset():
         warning = await _reconcile_check()
 
         if cfg.auto_snapshot:
-            await _run(snapshot_save, gpu, _state["gpu_name"], cfg.snapshot_dir)
+            await _run(snapshot_save, gpu, _state["gpu_name"], cfg.snapshot_dir, cfg.max_snapshots)
 
         ret, desc = await _run(reset_offsets, gpu)
         if ret != 0:
             raise HTTPException(status_code=500, detail=f"Reset failed ({ret}): {desc}")
 
-        offsets, _ = await _run(read_clock_offsets, gpu)
-        _state["last_offsets"] = offsets
-
-        if _state["curve_clients"]:
-            state, _ = await _run(read_curve, gpu, _state["gpu_name"])
-            if state:
-                await _broadcast(_state["curve_clients"], _curve_state_dict(state))
-
+        await _update_offsets_and_broadcast(gpu)
         _state["active_profile"] = None
 
     result = {"ok": True, "return_code": ret, "description": desc}
@@ -756,7 +739,7 @@ async def api_curve_verify(req: VerifyRequest):
         raise HTTPException(status_code=500, detail=f"Failed to read current state: {err}")
 
     # Always snapshot before verify — it's a testing operation
-    await _run(snapshot_save, gpu, _state["gpu_name"], cfg.snapshot_dir)
+    await _run(snapshot_save, gpu, _state["gpu_name"], cfg.snapshot_dir, cfg.max_snapshots)
 
     async with _state["write_lock"]:
         ret, desc = await _run(write_offsets, gpu, req.deltas)
@@ -769,13 +752,8 @@ async def api_curve_verify(req: VerifyRequest):
         if after_offsets is None:
             raise HTTPException(status_code=500, detail=f"Verification read failed: {err}")
 
-        _state["last_offsets"] = after_offsets
         _state["active_profile"] = None
-
-        if _state["curve_clients"]:
-            state, _ = await _run(read_curve, gpu, _state["gpu_name"])
-            if state:
-                await _broadcast(_state["curve_clients"], _curve_state_dict(state))
+        await _update_offsets_and_broadcast(gpu)
 
     points_result = []
     all_matched = True
@@ -813,7 +791,7 @@ async def api_shutdown():
     """Gracefully shut down the server process."""
     import os
     import signal
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     loop.call_later(0.1, lambda: os.kill(os.getpid(), signal.SIGTERM))
     return {"ok": True}
 
@@ -823,7 +801,7 @@ async def api_snapshot_save():
     """Save a ClockBoostTable snapshot."""
     gpu = _require_gpu()
     cfg: Config = _state["config"]
-    path = await _run(snapshot_save, gpu, _state["gpu_name"], cfg.snapshot_dir)
+    path = await _run(snapshot_save, gpu, _state["gpu_name"], cfg.snapshot_dir, cfg.max_snapshots)
     if path is None:
         raise HTTPException(status_code=500, detail="Failed to save snapshot")
     return {"ok": True, "filepath": path}
@@ -840,14 +818,7 @@ async def api_snapshot_restore(req: SnapshotRestoreRequest):
         if not ok:
             raise HTTPException(status_code=500, detail="Failed to restore snapshot")
 
-        offsets, _ = await _run(read_clock_offsets, gpu)
-        _state["last_offsets"] = offsets
-
-        if _state["curve_clients"]:
-            state, _ = await _run(read_curve, gpu, _state["gpu_name"])
-            if state:
-                await _broadcast(_state["curve_clients"], _curve_state_dict(state))
-
+        await _update_offsets_and_broadcast(gpu)
         _state["active_profile"] = None
 
     return {"ok": True}

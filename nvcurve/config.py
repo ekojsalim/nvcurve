@@ -9,6 +9,7 @@ class Config:
     # Safety limits
     max_delta_khz: int = 1000_000        # ±1000 MHz hard cap
     auto_snapshot: bool = True          # Save snapshot before every write
+    max_snapshots: int = 20             # Maximum snapshots to keep (0 = unlimited)
 
     # Monitoring
     poll_interval_s: float = 1.0        # WebSocket monitor poll rate

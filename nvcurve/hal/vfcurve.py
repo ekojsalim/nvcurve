@@ -15,18 +15,32 @@ from ..nvapi.types import VFPoint, CurveState
 
 # ── Mask helpers ─────────────────────────────────────────────────────────────
 
+# The boost mask is a static property of the GPU/driver — it does not change
+# at runtime. Cache it per GPU handle to avoid redundant GetClockBoostMask
+# calls on every HAL operation.
+_boost_mask_cache: dict[int, bytes] = {}
+
+
 def get_boost_mask(gpu) -> tuple[Optional[bytes], str]:
     """Read the canonical 32-byte clock boost mask from the driver.
-    
+
+    The result is cached per GPU handle: subsequent calls return the cached
+    value without hitting the driver again.
+
     Returns (mask_bytes, "OK") or (None, error).
     """
+    if gpu in _boost_mask_cache:
+        return _boost_mask_cache[gpu], "OK"
+
     from ..nvapi.constants import MASK_SIZE
     def fill(b):
         for i in range(4, 4 + 32):
             b[i] = 0xFF
     d, err = nvcall(FUNC["GetClockBoostMask"], gpu, MASK_SIZE, ver=1, pre_fill=fill)
     if d and len(d) >= 36:
-        return d[4:36], "OK"
+        mask = d[4:36]
+        _boost_mask_cache[gpu] = mask
+        return mask, "OK"
     return None, err
 
 

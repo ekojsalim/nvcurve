@@ -70,10 +70,19 @@ def parse_range(s: str):
 
 # ── Output formatters ─────────────────────────────────────────────────────────
 
-def print_curve(points, offsets, voltage, full=False):
+def print_curve(points, offsets, voltage, domains=None, full=False):
     """Print formatted V/F curve table."""
     if voltage:
         print(f"Current voltage: {voltage / 1000:.1f} mV")
+
+    if domains:
+        gpu_count = sum(1 for d in domains if d == "gpu")
+        mem_count = sum(1 for d in domains if d == "memory")
+        parts = [f"{gpu_count} GPU core points"]
+        if mem_count:
+            parts.append(f"{mem_count} memory points")
+        parts.append(f"{gpu_count + mem_count} total")
+        print(f"Curve: {', '.join(parts)}")
     print()
 
     current_idx = None
@@ -91,12 +100,18 @@ def print_curve(points, offsets, voltage, full=False):
         for i, (f, v) in enumerate(points):
             if f == 0 and v == 0:
                 continue
-            if f != prev_freq or i == len(points) - 1:
+            if domains and i < len(domains) and domains[i] == "memory":
+                show.append(i)
+            elif f != prev_freq or i == len(points) - 1:
                 show.append(i)
             prev_freq = f
 
-    print(f"{'#':>3s}  {'Freq':>8s}  {'Voltage':>8s}  {'Offset':>8s}")
-    print("-" * 42)
+    if domains:
+        print(f"{'#':>3s}  {'Freq':>8s}  {'Voltage':>8s}  {'Offset':>8s}  {'Domain'}")
+        print("-" * 56)
+    else:
+        print(f"{'#':>3s}  {'Freq':>8s}  {'Voltage':>8s}  {'Offset':>8s}")
+        print("-" * 42)
 
     for i in show:
         f, v = points[i]
@@ -107,44 +122,89 @@ def print_curve(points, offsets, voltage, full=False):
         offset_s = ""
         if offsets and offsets[i] != 0:
             offset_s = f"{offsets[i] / 1000:+.0f} MHz"
+        domain = domains[i] if domains and i < len(domains) else ""
         marker = ""
         if current_idx is not None and i == current_idx:
             marker = "  <-- current"
-        elif f < 1_000_000 and v > 0:
+        elif f < 1_000_000 and v > 0 and not domain:
             marker = "  (low-power)"
-        print(f"{i:3d}  {freq_s:>8s}  {volt_s:>8s}  {offset_s:>8s}{marker}")
+        if domains:
+            print(f"{i:3d}  {freq_s:>8s}  {volt_s:>8s}  {offset_s:>8s}  {domain}{marker}")
+        else:
+            print(f"{i:3d}  {freq_s:>8s}  {volt_s:>8s}  {offset_s:>8s}{marker}")
 
-    active = [(f, v) for f, v in points if f > 0 and v > 0]
-    if active:
-        freqs = [f for f, v in active]
-        volts = [v for f, v in active]
-        print()
-        print(f"Frequency range: {min(freqs)/1000:.0f} – {max(freqs)/1000:.0f} MHz")
-        print(f"Voltage range:   {min(volts)/1000:.0f} – {max(volts)/1000:.0f} mV")
-        print(f"V/F points: {len(active)}")
+    print()
+    if domains:
+        gpu_idxs = [i for i, d in enumerate(domains) if d == "gpu"]
+        mem_idxs = [i for i, d in enumerate(domains) if d == "memory"]
+
+        gpu_active = [(points[i][0], points[i][1]) for i in gpu_idxs
+                      if i < len(points) and points[i][0] > 0]
+        if gpu_active:
+            freqs = [f for f, v in gpu_active]
+            volts = [v for f, v in gpu_active]
+            print(f"GPU core: {min(freqs)/1000:.0f} – {max(freqs)/1000:.0f} MHz, "
+                  f"{min(volts)/1000:.0f} – {max(volts)/1000:.0f} mV "
+                  f"({len(gpu_active)} points)")
+
+        mem_active = [(points[i][0], points[i][1]) for i in mem_idxs
+                      if i < len(points) and points[i][0] > 0]
+        if mem_active:
+            freqs = [f for f, v in mem_active]
+            volts = [v for f, v in mem_active]
+            print(f"Memory:   {min(freqs)/1000:.0f} – {max(freqs)/1000:.0f} MHz, "
+                  f"{min(volts)/1000:.0f} – {max(volts)/1000:.0f} mV "
+                  f"({len(mem_active)} points)")
+
         if offsets:
-            nonzero = sum(1 for o in offsets if o != 0)
-            if nonzero > 0:
-                vals = set(o for o in offsets if o != 0)
+            gpu_offsets = [offsets[i] for i in gpu_idxs
+                           if i < len(offsets) and offsets[i] != 0]
+            if gpu_offsets:
+                vals = set(gpu_offsets)
                 if len(vals) == 1:
-                    print(f"Global offset: {next(iter(vals))/1000:+.0f} MHz "
-                          f"(applied to {nonzero} points)")
+                    print(f"GPU offset: {next(iter(vals))/1000:+.0f} MHz "
+                          f"(uniform across {len(gpu_offsets)} points)")
                 else:
-                    print(f"Per-point offsets active on {nonzero} points "
+                    print(f"GPU offsets: {len(gpu_offsets)} points active "
                           f"(range: {min(vals)/1000:+.0f} to {max(vals)/1000:+.0f} MHz)")
+    else:
+        active = [(f, v) for f, v in points if f > 0 and v > 0]
+        if active:
+            freqs = [f for f, v in active]
+            volts = [v for f, v in active]
+            print(f"Frequency range: {min(freqs)/1000:.0f} – {max(freqs)/1000:.0f} MHz")
+            print(f"Voltage range:   {min(volts)/1000:.0f} – {max(volts)/1000:.0f} mV")
+            print(f"V/F points: {len(active)}")
+            if offsets:
+                nonzero = sum(1 for o in offsets if o != 0)
+                if nonzero > 0:
+                    vals = set(o for o in offsets if o != 0)
+                    if len(vals) == 1:
+                        print(f"Global offset: {next(iter(vals))/1000:+.0f} MHz "
+                              f"(applied to {nonzero} points)")
+                    else:
+                        print(f"Per-point offsets active on {nonzero} points "
+                              f"(range: {min(vals)/1000:+.0f} to {max(vals)/1000:+.0f} MHz)")
 
 
-def output_json(gpu_name, points, offsets, voltage):
+def output_json(gpu_name, points, offsets, voltage, domains=None):
     """Output JSON format."""
+    gpu_points = [i for i, d in enumerate(domains) if d == "gpu"] if domains else []
+    mem_points = [i for i, d in enumerate(domains) if d == "memory"] if domains else []
     data = {
         "gpu": gpu_name,
         "current_voltage_uV": voltage,
         "layout": {
             "vfp_curve": {"size": VFP_SIZE, "base": VFP_BASE,
-                          "stride": VFP_STRIDE, "points": len(points)},
+                          "stride": VFP_STRIDE, "max_entries": len(points)},
             "clock_table": {"size": CT_SIZE, "base": CT_BASE,
                             "stride": CT_STRIDE, "delta_offset": 0x14,
-                            "points": CT_POINTS},
+                            "max_entries": CT_POINTS},
+        },
+        "curve_info": {
+            "gpu_points": gpu_points,
+            "mem_points": mem_points,
+            "total_points": len(points),
         },
         "vf_curve": [],
     }
@@ -154,8 +214,8 @@ def output_json(gpu_name, points, offsets, voltage):
                 entry = {"index": i, "freq_kHz": f, "volt_uV": v}
                 if offsets:
                     entry["freq_offset_kHz"] = offsets[i]
-                if i == len(points) - 1 and f < 1_000_000:
-                    entry["type"] = "idle"
+                if domains and i < len(domains):
+                    entry["domain"] = domains[i]
                 data["vf_curve"].append(entry)
     print(json.dumps(data, indent=2))
 
@@ -340,13 +400,13 @@ def _discover_server_url(cfg: Config) -> str:
 
 # ── Subcommand handlers ───────────────────────────────────────────────────────
 
-def _show_curve(gpu_name, points, offsets, voltage, args) -> None:
+def _show_curve(gpu_name, points, offsets, voltage, args, domains=None) -> None:
     """Format and print curve data — shared by HTTP and direct-HAL paths."""
     if args.json:
-        output_json(gpu_name, points, offsets, voltage)
+        output_json(gpu_name, points, offsets, voltage, domains=domains)
         return
     print(f"GPU: {gpu_name}")
-    print_curve(points, offsets, voltage, full=args.full)
+    print_curve(points, offsets, voltage, domains=domains, full=args.full)
 
 
 def cmd_read(args, client: NvCurveClient):
@@ -400,7 +460,8 @@ def cmd_read(args, client: NvCurveClient):
         if curve_state:
             points = [(p.freq_khz, p.volt_uv) for p in curve_state.points]
             offsets = [p.delta_khz for p in curve_state.points]
-            _show_curve(gpu_name, points, offsets, voltage, args)
+            domains = [p.domain for p in curve_state.points]
+            _show_curve(gpu_name, points, offsets, voltage, args, domains=domains)
         return
 
     # ── Normal path — via server, with direct-HAL fallback ────────────────────
@@ -424,21 +485,23 @@ def cmd_read(args, client: NvCurveClient):
         voltage, _ = _read_voltage(gpu)
         points = [(p.freq_khz, p.volt_uv) for p in curve_state.points]
         offsets = [p.delta_khz for p in curve_state.points]
-        _show_curve(gpu_name, points, offsets, voltage, args)
+        domains = [p.domain for p in curve_state.points]
+        _show_curve(gpu_name, points, offsets, voltage, args, domains=domains)
         return
 
     gpu_name = curve_data["gpu_name"]
     pts = curve_data["points"]
     points = [(p["freq_khz"], p["volt_uv"]) for p in pts]
     offsets = [p["delta_khz"] for p in pts]
-    _show_curve(gpu_name, points, offsets, voltage, args)
+    domains = [p["domain"] for p in pts]
+    _show_curve(gpu_name, points, offsets, voltage, args, domains=domains)
 
 
 def cmd_inspect(args):
     """Show detailed raw ClockBoostTable fields. Requires root (direct HAL)."""
     require_root()
     from .hal.gpu import get_gpu
-    from .hal.vfcurve import read_clock_table_raw, read_clock_entry_full, read_vfp_curve
+    from .hal.vfcurve import read_clock_table_raw, read_clock_entry_full, read_curve
 
     gpu, gpu_name = get_gpu(index=0)
     raw, err = read_clock_table_raw(gpu)
@@ -446,16 +509,38 @@ def cmd_inspect(args):
         print(f"Failed to read ClockBoostTable: {err}")
         return
 
-    points_data, _ = read_vfp_curve(gpu)
+    curve_state, _ = read_curve(gpu, gpu_name)
+    points_data = {}
+    gpu_indices = set()
+    mem_indices = set()
+    if curve_state:
+        for p in curve_state.points:
+            points_data[p.index] = (p.freq_khz, p.volt_uv)
+            if p.domain == "memory":
+                mem_indices.add(p.index)
+            else:
+                gpu_indices.add(p.index)
 
     if args.point is not None:
         indices = [args.point]
     elif args.range:
         indices = list(range(args.range[0], args.range[1] + 1))
     else:
-        indices = [0, 1, 50, 51, 80, 126, 127]
+        defaults = [0, 1, 50, 51, 80, 126]
+        if mem_indices:
+            mp = min(mem_indices)
+            defaults.extend([mp - 1, mp, mp + 1, max(mem_indices)])
+        else:
+            defaults.append(127)
+        indices = sorted(set(defaults))
 
     print(f"GPU: {gpu_name}")
+    if curve_state:
+        parts = [f"{len(gpu_indices)} GPU core points"]
+        if mem_indices:
+            parts.append(f"{len(mem_indices)} memory points")
+        parts.append(f"{len(gpu_indices) + len(mem_indices)} total")
+        print(f"Curve: {', '.join(parts)}")
     print(f"ClockBoostTable entry detail (stride=0x{CT_STRIDE:02X}, "
           f"9 fields × 4 bytes)")
     print()
@@ -466,12 +551,18 @@ def cmd_inspect(args):
         entry = read_clock_entry_full(raw, p)
         off = CT_BASE + p * CT_STRIDE
 
+        domain_label = ""
+        if p in mem_indices:
+            domain_label = " [MEMORY]"
+        elif p in gpu_indices:
+            domain_label = " [GPU]"
+
         freq_str = ""
-        if points_data:
+        if p in points_data:
             f, v = points_data[p]
             freq_str = f"  (VFP: {f/1000:.0f} MHz @ {v/1000:.0f} mV)"
 
-        print(f"Point {p:3d} — buffer offset 0x{off:04X}{freq_str}")
+        print(f"Point {p:3d} — buffer offset 0x{off:04X}{domain_label}{freq_str}")
         for key, val in entry.items():
             if key == "freqDelta_kHz":
                 continue

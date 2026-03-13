@@ -13,10 +13,11 @@ from ..nvapi.types import SnapshotInfo
 from .vfcurve import read_clock_table_raw, get_boost_mask
 
 
-def save(gpu, gpu_name: str, snapshot_dir: str) -> Optional[str]:
+def save(gpu, gpu_name: str, snapshot_dir: str, max_snapshots: int = 0) -> Optional[str]:
     """Save the current ClockBoostTable to disk.
 
     Writes both a binary .bin file and a human-readable .json metadata file.
+    If max_snapshots > 0, deletes the oldest snapshots to stay within the limit.
     Returns the binary filepath on success, or None on failure.
     """
     raw, err = read_clock_table_raw(gpu)
@@ -55,7 +56,26 @@ def save(gpu, gpu_name: str, snapshot_dir: str) -> Optional[str]:
     print(f"  Metadata: {meta_path}")
     print(f"  Size:     {len(raw)} bytes")
     print(f"  Non-zero offsets: {meta['nonzero_offsets']}")
+
+    if max_snapshots > 0:
+        _prune_snapshots(snapshot_dir, max_snapshots)
+
     return bin_path
+
+
+def _prune_snapshots(snapshot_dir: str, max_snapshots: int) -> None:
+    """Delete oldest snapshots (both .bin and .json) to stay within max_snapshots."""
+    bins = sorted(
+        f for f in os.listdir(snapshot_dir) if f.endswith(".bin")
+    )  # oldest first (lexicographic = chronological for our timestamp format)
+    excess = len(bins) - max_snapshots
+    for fname in bins[:excess]:
+        stem = fname[:-4]  # strip .bin
+        for ext in (".bin", ".json"):
+            try:
+                os.remove(os.path.join(snapshot_dir, stem + ext))
+            except OSError:
+                pass
 
 
 def restore(gpu, snapshot_dir: str, filepath: str = None) -> bool:
