@@ -10,7 +10,7 @@ from typing import Optional
 from ..nvapi.bootstrap import nvcall_raw
 from ..nvapi.constants import FUNC, CT_SIZE, CT_BASE, CT_STRIDE, CT_DELTA_OFF, CT_POINTS
 from ..nvapi.types import SnapshotInfo
-from .vfcurve import read_clock_table_raw
+from .vfcurve import read_clock_table_raw, get_boost_mask
 
 
 def save(gpu, gpu_name: str, snapshot_dir: str) -> Optional[str]:
@@ -98,8 +98,10 @@ def restore(gpu, snapshot_dir: str, filepath: str = None) -> bool:
     ctypes.memmove(buf, raw, CT_SIZE)
 
     # Full mask for restore — write all points
-    for i in range(4, 4 + 16):
-        buf[i] = 0xFF
+    mask, _ = get_boost_mask(gpu)
+    if mask:
+        for i in range(32):
+            buf[4 + i] = mask[i]
 
     print(f"Restoring from: {filepath}")
     ret, desc = nvcall_raw(FUNC["SetClockBoostTable"], gpu, buf)

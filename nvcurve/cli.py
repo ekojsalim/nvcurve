@@ -164,7 +164,7 @@ def output_json(gpu_name, points, offsets, voltage):
 
 def run_diagnostics(gpu, gpu_name):
     """Probe all known NvAPI functions and report results."""
-    from .hal.vfcurve import fill_mask_128
+    from .hal.vfcurve import get_boost_mask
     from .nvapi.bootstrap import nvcall, query_interface
     from .nvapi.constants import FUNC, MASK_SIZE, VOLT_SIZE, RANGES_SIZE, PERF_SIZE, VBOOST_SIZE
 
@@ -189,15 +189,23 @@ def run_diagnostics(gpu, gpu_name):
         resolved = "resolved" if ptr else "NOT FOUND"
         print(f"  {name:30s}  0x{fid:08X}  size=0x{size:04X}  ver={ver}  {resolved}")
 
+    mask_bytes = None
+    mask_err = ""
     print()
     print("=== Read function tests ===")
+    
+    mask_bytes, mask_err = get_boost_mask(gpu)
+    if not mask_bytes:
+        print(f"  WARNING: Failed to get boost mask: {mask_err}")
+
     for name, fid, size, ver, needs_mask in probes:
         if name.startswith("Set"):
             continue
 
-        def fill(buf, _nm=needs_mask, _fid=fid):
-            if _nm:
-                fill_mask_128(buf)
+        def fill(buf, _nm=needs_mask, _fid=fid, _mask=mask_bytes):
+            if _nm and _mask:
+                for i in range(32):
+                    buf[4 + i] = _mask[i]
             if _fid == FUNC["GetVFPCurve"]:
                 struct.pack_into("<I", buf, 0x14, 15)
 
@@ -353,7 +361,7 @@ def cmd_read(args, client: NvCurveClient):
     if args.raw:
         require_root()
         from .hal.gpu import get_gpu
-        from .hal.vfcurve import read_clock_table_raw, fill_mask_128
+        from .hal.vfcurve import read_clock_table_raw, get_boost_mask
         from .hal.monitoring import read_voltage
         from .nvapi.bootstrap import nvcall
         from .nvapi.constants import FUNC
@@ -361,8 +369,11 @@ def cmd_read(args, client: NvCurveClient):
 
         print(f"GPU: {gpu_name}")
 
+        mask_bytes, _ = get_boost_mask(gpu)
         def fill_vfp(buf):
-            fill_mask_128(buf)
+            if mask_bytes:
+                for i in range(32):
+                    buf[4 + i] = mask_bytes[i]
             struct.pack_into("<I", buf, 0x14, 15)
 
         vfp_raw, _ = nvcall(FUNC["GetVFPCurve"], gpu, VFP_SIZE, ver=1, pre_fill=fill_vfp)
@@ -561,6 +572,13 @@ def _print_write_warnings(result: dict) -> None:
 
 
 def cmd_verify(args, client: NvCurveClient):
+    """Write-verify-read cycle — runs directly against hardware (requires root)."""
+    require_root()
+
+    from .hal.gpu import get_gpu
+    from .hal.vfcurve import read_clock_offsets, write_offsets
+    from .hal.snapshot import save as snapshot_save
+
     delta_khz = int(args.delta * 1000)
 
     if args.point is not None:
@@ -573,29 +591,58 @@ def cmd_verify(args, client: NvCurveClient):
 
     point_deltas = {p: delta_khz for p in points}
 
+    gpu, gpu_name = get_gpu(index=0)
+
     print("=== Write-Verify Cycle ===")
+    print(f"GPU:    {gpu_name}")
     print(f"Points: {points[0]}{'–' + str(points[-1]) if len(points) > 1 else ''}")
     print(f"Delta:  {args.delta:+.0f} MHz ({delta_khz:+d} kHz)")
     print()
-    print("Writing and verifying...")
 
-    try:
-        result = client.verify_write(point_deltas)
-    except ServerNotRunning:
-        _server_not_running(client._base)
+    # Step 1: read before state
+    before_offsets, err = read_clock_offsets(gpu)
+    if before_offsets is None:
+        print(f"Failed to read current state: {err}")
         return
-    except ApiError as e:
-        print(f"Verify failed: {e.detail}")
+
+    # Step 2: snapshot before write
+    filepath = snapshot_save(gpu, gpu_name, default_config.snapshot_dir)
+    if filepath:
+        print(f"Snapshot saved: {filepath}")
+
+    # Step 3: write
+    print("Writing and verifying...")
+    ret, desc = write_offsets(gpu, point_deltas)
+    if ret != 0:
+        print(f"Write failed ({ret}): {desc}")
+        return
+
+    time.sleep(0.2)
+
+    # Step 4: read after state
+    after_offsets, err = read_clock_offsets(gpu)
+    if after_offsets is None:
+        print(f"Verification read failed: {err}")
         return
 
     print()
     print("Verification results:")
-    for p in result.get("points", []):
-        match_s = "OK" if p["match"] else "MISMATCH"
-        print(f"  Point {p['point']:3d}: expected {p['expected_khz']/1000:+8.0f} MHz, "
-              f"got {p['actual_khz']/1000:+8.0f} MHz  [{match_s}]")
+    all_matched = True
+    for p in sorted(point_deltas):
+        expected = point_deltas[p]
+        actual = after_offsets[p] if p < len(after_offsets) else 0
+        match = actual == expected
+        if not match:
+            all_matched = False
+        match_s = "OK" if match else "MISMATCH"
+        print(f"  Point {p:3d}: expected {expected/1000:+8.0f} MHz, "
+              f"got {actual/1000:+8.0f} MHz  [{match_s}]")
 
-    collateral = result.get("collateral_changes", [])
+    collateral = [
+        {"point": i, "before_khz": before_offsets[i], "after_khz": after_offsets[i]}
+        for i in range(min(len(before_offsets), len(after_offsets)))
+        if i not in point_deltas and before_offsets[i] != after_offsets[i]
+    ]
     print()
     if collateral:
         print("Unintended side effects detected:")
@@ -607,9 +654,9 @@ def cmd_verify(args, client: NvCurveClient):
 
     print()
     print("=" * 50)
-    if result.get("ok"):
+    if all_matched and not collateral:
         print("RESULT: Write verified successfully.")
-    elif not result.get("all_matched"):
+    elif not all_matched:
         print("RESULT: Write verification FAILED — offsets don't match.")
     else:
         print("RESULT: Write applied but with unexpected side effects.")
@@ -944,7 +991,7 @@ def build_parser() -> argparse.ArgumentParser:
 Examples:
   %(prog)s                               Launch web UI (default)
   %(prog)s read                          Condensed V/F curve
-  %(prog)s read --full                   All 128 points
+  %(prog)s read --full                   All points
   %(prog)s read --json                   JSON output
   %(prog)s write --global --delta 50     +50 MHz to all points
   %(prog)s write --point 80 --delta 100  +100 MHz to point 80
@@ -968,7 +1015,7 @@ Examples:
 
     # read
     p_read = sub.add_parser("read", help="Read V/F curve")
-    p_read.add_argument("--full", action="store_true", help="Show all 128 points")
+    p_read.add_argument("--full", action="store_true", help="Show all points")
     p_read.add_argument("--json", action="store_true", help="JSON output")
     p_read.add_argument("--raw", action="store_true",
                         help="Raw hex dumps of hardware buffers (needs root)")

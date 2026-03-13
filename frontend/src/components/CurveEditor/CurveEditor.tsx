@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
-import { Check, X, RotateCcw } from 'lucide-react';
+import { Check, X, RotateCcw, RefreshCw } from 'lucide-react';
 import { scaleLinear } from 'd3';
 import type { VFPoint, CurveState } from '../../types';
 import { CurveTooltip } from './CurveTooltip';
@@ -10,16 +10,14 @@ import { useCurveStore } from '../../store/curveStore';
 
 interface Props {
   curve: CurveState;
+  activeDomain: 'gpu' | 'memory';
+  onDomainChange: (d: 'gpu' | 'memory') => void;
   currentVoltageMv: number | null;
   currentClockMhz: number | null;
   onRefresh: () => void;
 }
 
 const MARGIN = { top: 16, right: 24, bottom: 48, left: 64 };
-const SVG_W = 680;
-const SVG_H = 460;
-const INNER_W = SVG_W - MARGIN.left - MARGIN.right;
-const INNER_H = SVG_H - MARGIN.top - MARGIN.bottom;
 
 /** Drag-tooltip info (shown while actively dragging a point) */
 interface DragInfo {
@@ -34,13 +32,40 @@ interface DragInfo {
 /** Box-select rubber-band rect (SVG inner coords) */
 interface BoxRect { x0: number; y0: number; x1: number; y1: number }
 
-export function CurveEditor({ curve, currentVoltageMv, currentClockMhz, onRefresh }: Props) {
+export function CurveEditor({ curve, activeDomain, onDomainChange, currentVoltageMv, currentClockMhz, onRefresh }: Props) {
+  const readOnly = activeDomain === 'memory';
   const [hoveredPoint, setHoveredPoint] = useState<VFPoint | null>(null);
   const [dragInfo, setDragInfo] = useState<DragInfo | null>(null);
   const [boxRect, setBoxRect] = useState<BoxRect | null>(null);
   const [inlineInput, setInlineInput] = useState<{ pointIndex: number; value: string } | null>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const [svgCursor, setSvgCursor] = useState<string>('default');
+
+  // ─── Dynamic SVG dimensions ──────────────────────────────────────────────
+  const [svgW, setSvgW] = useState(680);
+  const svgWRef = useRef(680);
+  svgWRef.current = svgW;
+  const INNER_W = svgW - MARGIN.left - MARGIN.right;
+
+  const [svgH, setSvgH] = useState(460);
+  const svgHRef = useRef(460);
+  svgHRef.current = svgH;
+  const INNER_H = svgH - MARGIN.top - MARGIN.bottom;
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(entries => {
+      const { width, height } = entries[0].contentRect;
+      const w = Math.round(width);
+      const h = Math.min(Math.round(height), 500, Math.round(window.innerHeight * 0.58));
+      setSvgW(prev => prev === w ? prev : Math.max(300, w));
+      setSvgH(prev => prev === h ? prev : Math.max(200, h));
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   // Store
   const {
@@ -88,8 +113,17 @@ export function CurveEditor({ curve, currentVoltageMv, currentClockMhz, onRefres
     }
   }
 
-  const pts = curve.points;
-  const clampedPoints = useMemo(() => detectClampedPoints(curve.points), [curve.points]);
+  const pts = useMemo(
+    () => curve.points.filter(p => p.domain === activeDomain),
+    [curve.points, activeDomain],
+  );
+  const clampedPoints = useMemo(() => detectClampedPoints(pts), [pts]);
+
+  // Clear selection and pending when switching domains
+  useEffect(() => {
+    clearSelection();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeDomain]);
 
   // ─── X-axis zoom / viewport ──────────────────────────────────────────────
   // Use a slightly larger padding to space things out better
@@ -112,11 +146,28 @@ export function CurveEditor({ curve, currentVoltageMv, currentClockMhz, onRefres
   const yScale = scaleLinear().domain([freqMin, freqMax]).range([INNER_H, 0]);
 
   // Keep scales in a ref so event handler closures always see the latest
-  const scalesRef = useRef({ xScale, yScale, xViewport });
-  scalesRef.current = { xScale, yScale, xViewport };
+  const scalesRef = useRef({ xScale, yScale, xViewport, innerW: INNER_W });
+  scalesRef.current = { xScale, yScale, xViewport, innerW: INNER_W };
 
   const xTicks = xScale.ticks(8);
   const yTicks = yScale.ticks(6);
+
+  // ─── Zoom factor (for toolbar slider) ────────────────────────────────────
+  const [fullExtentMin, fullExtentMax] = voltExtent(pts);
+  const fullWidth = (fullExtentMax - fullExtentMin) + 80;
+  const currentWidth = xViewport[1] - xViewport[0];
+  const zoomFactor = Math.max(1, Math.min(10, fullWidth / currentWidth));
+
+  function handleZoomChange(factor: number) {
+    const pad = 40;
+    const newWidth = Math.max(20, fullWidth / factor);
+    const center = (xViewport[0] + xViewport[1]) / 2;
+    let newMin = center - newWidth / 2;
+    let newMax = center + newWidth / 2;
+    if (newMin < fullExtentMin - pad) { newMin = fullExtentMin - pad; newMax = newMin + newWidth; }
+    if (newMax > fullExtentMax + pad) { newMax = fullExtentMax + pad; newMin = newMax - newWidth; }
+    setXViewport([newMin, newMax]);
+  }
 
   // Polylines
   const visiblePts = pts.filter((p) => {
@@ -146,8 +197,8 @@ export function CurveEditor({ curve, currentVoltageMv, currentClockMhz, onRefres
     if (!svg || !container) return null;
     const svgRect = svg.getBoundingClientRect();
     const containerRect = container.getBoundingClientRect();
-    const scaleX = svgRect.width / SVG_W;
-    const scaleY = svgRect.height / SVG_H;
+    const scaleX = svgRect.width / svgWRef.current;
+    const scaleY = svgRect.height / svgHRef.current;
     return {
       x: svgRect.left - containerRect.left + (svgX + MARGIN.left) * scaleX,
       y: svgRect.top - containerRect.top + (svgY + MARGIN.top) * scaleY,
@@ -159,9 +210,20 @@ export function CurveEditor({ curve, currentVoltageMv, currentClockMhz, onRefres
     if (!svg) return null;
     const rect = svg.getBoundingClientRect();
     return {
-      x: (clientX - rect.left) * (SVG_W / rect.width) - MARGIN.left,
-      y: (clientY - rect.top) * (SVG_H / rect.height) - MARGIN.top,
+      x: (clientX - rect.left) * (svgWRef.current / rect.width) - MARGIN.left,
+      y: (clientY - rect.top) * (svgHRef.current / rect.height) - MARGIN.top,
     };
+  }
+
+  // ─── SVG cursor ──────────────────────────────────────────────────────────
+  function handleSvgMouseMove(e: React.MouseEvent) {
+    if (isPanning.current) return;
+    const next = e.shiftKey ? 'crosshair' : 'default';
+    setSvgCursor(c => c === next ? c : next);
+  }
+
+  function handleSvgMouseLeave() {
+    if (!isPanning.current) setSvgCursor('default');
   }
 
   // ─── Point hover ─────────────────────────────────────────────────────────
@@ -194,6 +256,7 @@ export function CurveEditor({ curve, currentVoltageMv, currentClockMhz, onRefres
 
   // ─── Point mousedown → start drag ────────────────────────────────────────
   function handlePointMouseDown(e: React.MouseEvent, p: VFPoint) {
+    if (readOnly) return;
     containerRef.current?.focus();
     e.stopPropagation();
     e.preventDefault();
@@ -245,13 +308,14 @@ export function CurveEditor({ curve, currentVoltageMv, currentClockMhz, onRefres
     } else {
       // Plain drag = pan
       isPanning.current = true;
+      setSvgCursor('grabbing');
       panState.current = { startX: inner.x, startY: inner.y, startViewport: [...scalesRef.current.xViewport] as [number, number] };
     }
   }
 
-  // ─── Scroll wheel → zoom x-axis around cursor (Ctrl/Meta + scroll only) ──
+  // ─── Scroll wheel → zoom x-axis around cursor (Alt + scroll) ────────────
   function handleWheel(e: React.WheelEvent) {
-    if (!e.ctrlKey && !e.metaKey) return; // plain scroll → let page scroll normally
+    if (!e.altKey) return; // plain scroll → let page scroll normally
     e.preventDefault();
     const inner = clientToInner(e.clientX, e.clientY);
     if (!inner) return;
@@ -328,7 +392,7 @@ export function CurveEditor({ curve, currentVoltageMv, currentClockMhz, onRefres
         if (!inner) return;
         const ps = panState.current;
         // How many volts does 1 SVG-inner-px correspond to?
-        const voltPerPx = (ps.startViewport[1] - ps.startViewport[0]) / INNER_W;
+        const voltPerPx = (ps.startViewport[1] - ps.startViewport[0]) / scalesRef.current.innerW;
         const dxVolt = (inner.x - ps.startX) * voltPerPx;
         const [fullMin, fullMax] = voltExtent(pts);
         const pad = 20;
@@ -366,6 +430,7 @@ export function CurveEditor({ curve, currentVoltageMv, currentClockMhz, onRefres
       // --- End pan ---
       if (isPanning.current) {
         isPanning.current = false;
+        setSvgCursor('default');
         if (panState.current) {
           const inner = clientToInner(e.clientX, e.clientY);
           if (inner) {
@@ -430,38 +495,70 @@ export function CurveEditor({ curve, currentVoltageMv, currentClockMhz, onRefres
 
   return (
     <div className="bg-zinc-900 rounded-lg overflow-hidden flex flex-col h-full">
-      {/* Header: title + action buttons */}
+      {/* Header: title + domain toggle + action buttons */}
       <div className="flex items-center justify-between px-3 py-2 border-b border-zinc-800 shrink-0">
-        <span className="text-xs text-zinc-500 uppercase tracking-wider font-semibold">V/F Curve</span>
+        <div className="flex items-center gap-3">
+          <span className="text-xs text-zinc-500 uppercase tracking-wider font-semibold">V/F Curve</span>
+          {/* Domain toggle */}
+          <div className="flex rounded overflow-hidden border border-zinc-700 text-xs">
+            {([{label: 'GPU', value: 'gpu'}, {label: 'Memory', value: 'memory'}] as const).map((d) => (
+              <button
+                key={d.value}
+                onClick={() => onDomainChange(d.value)}
+                className={`px-2.5 py-0.5 capitalize transition-colors ${
+                  activeDomain === d.value
+                    ? 'bg-zinc-700 text-zinc-100'
+                    : 'bg-zinc-900 text-zinc-500 hover:text-zinc-300'
+                }`}
+              >
+                {d.label}
+              </button>
+            ))}
+          </div>
+          {readOnly && (
+            <span className="text-xs text-zinc-500 italic">read-only</span>
+          )}
+        </div>
         <div className="flex items-center gap-2">
-          {hasPending && (
+          {!readOnly && hasPending && (
             <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-cyan-500/15 border border-cyan-500/30 text-cyan-400 text-xs">
               {pendingDeltas.size} pending
             </span>
           )}
+          {!readOnly && (
+            <>
+              <button
+                onClick={() => setDialog('apply')}
+                disabled={!hasPending || busy}
+                className="flex items-center gap-1.5 px-2 py-1 rounded bg-emerald-700 hover:bg-emerald-600 text-white text-xs font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                <Check size={12} />
+                Apply
+              </button>
+              <button
+                onClick={() => discardEdits()}
+                disabled={!hasPending || busy}
+                className="flex items-center gap-1.5 px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                <X size={12} />
+                Discard
+              </button>
+              <button
+                onClick={() => setDialog('reset')}
+                disabled={busy}
+                className="flex items-center gap-1.5 px-2 py-1 rounded bg-zinc-800 hover:bg-red-900 text-zinc-400 hover:text-red-300 text-xs transition-colors"
+              >
+                <RotateCcw size={12} />
+                Reset
+              </button>
+            </>
+          )}
           <button
-            onClick={() => setDialog('apply')}
-            disabled={!hasPending || busy}
-            className="flex items-center gap-1.5 px-2 py-1 rounded bg-emerald-700 hover:bg-emerald-600 text-white text-xs font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            onClick={onRefresh}
+            className="flex items-center gap-1.5 px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs transition-colors"
           >
-            <Check size={12} />
-            Apply
-          </button>
-          <button
-            onClick={() => discardEdits()}
-            disabled={!hasPending || busy}
-            className="flex items-center gap-1.5 px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            <X size={12} />
-            Discard
-          </button>
-          <button
-            onClick={() => setDialog('reset')}
-            disabled={busy}
-            className="flex items-center gap-1.5 px-2 py-1 rounded bg-zinc-800 hover:bg-red-900 text-zinc-400 hover:text-red-300 text-xs transition-colors"
-          >
-            <RotateCcw size={12} />
-            Reset
+            <RefreshCw size={12} />
+            Refresh
           </button>
         </div>
       </div>
@@ -502,17 +599,18 @@ export function CurveEditor({ curve, currentVoltageMv, currentClockMhz, onRefres
 
       <div className="px-3 pt-3">
         <CurveToolbar
-          onRefresh={onRefresh}
           activePts={pts}
           onResetZoom={() => setXViewport(voltExtent(pts))}
           isZoomed={Math.abs((xViewport[1] - xViewport[0]) - (voltExtent(pts)[1] - voltExtent(pts)[0])) > 5}
+          readOnly={readOnly}
+          zoomFactor={zoomFactor}
+          onZoomChange={handleZoomChange}
         />
       </div>
 
       {/* Need tabIndex=0 to capture keyboard events */}
-      <div className="flex-1 min-h-0 relative focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500/50 px-3 pb-3"
+      <div className="flex-1 min-h-0 relative focus:outline-none px-3 pt-2 pb-3 flex flex-col justify-center"
         ref={containerRef}
-        style={{ maxHeight: '600px' }}
         tabIndex={0}
         onKeyDown={(e) => {
           if (inlineInput) {
@@ -588,12 +686,14 @@ export function CurveEditor({ curve, currentVoltageMv, currentClockMhz, onRefres
       >
         <svg
           ref={svgRef}
-          viewBox={`0 0 ${SVG_W} ${SVG_H}`}
+          viewBox={`0 0 ${svgW} ${svgH}`}
           width="100%"
-          height="100%"
+          height={svgH}
           className="block"
-          style={{ fontFamily: 'monospace', maxHeight: '600px', cursor: isPanning.current ? 'grabbing' : 'grab', userSelect: 'none' }}
+          style={{ fontFamily: 'monospace', cursor: svgCursor, userSelect: 'none' }}
           onMouseDown={handleSvgMouseDown}
+          onMouseMove={handleSvgMouseMove}
+          onMouseLeave={handleSvgMouseLeave}
           onWheel={handleWheel}
         >
           <g transform={`translate(${MARGIN.left},${MARGIN.top})`}>
@@ -654,26 +754,22 @@ export function CurveEditor({ curve, currentVoltageMv, currentClockMhz, onRefres
                 />
               )}
 
-              {/* Current voltage crosshair */}
-              {currentVoltageMv != null && xScale(currentVoltageMv) >= 0 && xScale(currentVoltageMv) <= INNER_W && (
+              {/* Current voltage / clock crosshairs — GPU domain only */}
+              {!readOnly && currentVoltageMv != null && xScale(currentVoltageMv) >= 0 && xScale(currentVoltageMv) <= INNER_W && (
                 <line
                   x1={xScale(currentVoltageMv)} x2={xScale(currentVoltageMv)}
                   y1={0} y2={INNER_H}
                   stroke="#facc15" strokeWidth={0.5} strokeDasharray="4 4" strokeOpacity={0.3}
                 />
               )}
-
-              {/* Current clock crosshair */}
-              {currentClockMhz != null && yScale(currentClockMhz) >= 0 && yScale(currentClockMhz) <= INNER_H && (
+              {!readOnly && currentClockMhz != null && yScale(currentClockMhz) >= 0 && yScale(currentClockMhz) <= INNER_H && (
                 <line
                   x1={0} x2={INNER_W}
                   y1={yScale(currentClockMhz)} y2={yScale(currentClockMhz)}
                   stroke="#facc15" strokeWidth={0.5} strokeDasharray="4 4" strokeOpacity={0.3}
                 />
               )}
-
-              {/* Current operating point marker */}
-              {currentVoltageMv != null && currentClockMhz != null &&
+              {!readOnly && currentVoltageMv != null && currentClockMhz != null &&
                 xScale(currentVoltageMv) >= 0 && xScale(currentVoltageMv) <= INNER_W &&
                 yScale(currentClockMhz) >= 0 && yScale(currentClockMhz) <= INNER_H && (
                   <circle
@@ -707,9 +803,9 @@ export function CurveEditor({ curve, currentVoltageMv, currentClockMhz, onRefres
                 const isSelected = selectedPoints.has(p.index);
                 const isDragging = dragInfo?.pointIndex === p.index;
 
-                let fill = '#34d399';
-                if (hasPendingEdit && !isSelected) fill = '#22d3ee';
-                if (isSelected) fill = '#22d3ee';
+                let fill = readOnly ? '#6366f1' : '#34d399';
+                if (!readOnly && hasPendingEdit && !isSelected) fill = '#22d3ee';
+                if (!readOnly && isSelected) fill = '#22d3ee';
 
                 // Tweaked radius for less bloated flat regions
                 const r = isDragging ? 5.5 : isHovered || isSelected || hasPendingEdit ? 4.5 : 2.5;
@@ -717,30 +813,31 @@ export function CurveEditor({ curve, currentVoltageMv, currentClockMhz, onRefres
                 return (
                   <g key={p.index}>
                     {/* Dim ring at confirmed position (only visible when there's a pending edit) */}
-                    {ghostCy !== null && Math.abs(ghostCy - mainCy) > 0.5 && (
+                    {!readOnly && ghostCy !== null && Math.abs(ghostCy - mainCy) > 0.5 && (
                       <circle cx={cx} cy={ghostCy} r={3}
                         fill="none" stroke="#34d399" strokeWidth={1} strokeOpacity={0.4} />
                     )}
 
                     {/* Drop-line from confirmed → pending while dragging */}
-                    {isDragging && ghostCy !== null && Math.abs(ghostCy - mainCy) > 1 && (
+                    {!readOnly && isDragging && ghostCy !== null && Math.abs(ghostCy - mainCy) > 1 && (
                       <line x1={cx} y1={ghostCy} x2={cx} y2={mainCy}
                         stroke="#22d3ee" strokeWidth={1} strokeDasharray="3 2" strokeOpacity={0.5} />
                     )}
 
-                    {/* Main interactive circle — at pending position if staged, otherwise confirmed */}
+                    {/* Main circle */}
                     <circle
                       cx={cx}
                       cy={mainCy}
                       r={r}
                       fill={fill}
-                      stroke={isDragging ? '#fff' : isSelected ? '#fff' : isHovered ? '#fff' : 'none'}
+                      fillOpacity={readOnly ? 0.7 : 1}
+                      stroke={!readOnly && (isDragging || isSelected || isHovered) ? '#fff' : 'none'}
                       strokeWidth={isDragging ? 2 : isSelected ? 2 : 1}
-                      style={{ cursor: 'ns-resize', transition: 'r 0.08s' }}
+                      style={{ cursor: readOnly ? 'default' : 'ns-resize', transition: 'r 0.08s' }}
                       onMouseEnter={() => handleMouseEnter(p)}
                       onMouseLeave={handleMouseLeave}
-                      onMouseDown={(e) => handlePointMouseDown(e, p)}
-                      onClick={(e) => {
+                      onMouseDown={readOnly ? undefined : (e) => handlePointMouseDown(e, p)}
+                      onClick={readOnly ? undefined : (e) => {
                         if (dragMoved.current) return;
                         selectPoint(p.index, e.shiftKey);
                       }}

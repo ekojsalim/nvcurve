@@ -105,6 +105,7 @@ def _vfpoint_dict(p) -> dict:
         "delta_mhz": p.delta_mhz,
         "effective_freq_khz": p.effective_freq_khz,
         "effective_freq_mhz": p.effective_freq_mhz,
+        "domain": p.domain,
     }
 
 
@@ -286,7 +287,7 @@ async def api_gpu():
 
 @app.get("/api/curve")
 async def api_curve():
-    """Full CurveState: all 128 V/F points with base freq, voltage, delta, effective freq."""
+    """Full CurveState: all V/F points with base freq, voltage, delta, effective freq."""
     gpu = _require_gpu()
     state, err = await _run(read_curve, gpu, _state["gpu_name"])
     if state is None:
@@ -300,12 +301,12 @@ async def api_curve():
 @app.get("/api/curve/{point}")
 async def api_curve_point(point: int):
     """Single V/F point detail."""
-    if point < 0 or point > 127:
-        raise HTTPException(status_code=400, detail="Point index must be 0–127")
     gpu = _require_gpu()
     state, err = await _run(read_curve, gpu, _state["gpu_name"])
     if state is None:
         raise HTTPException(status_code=500, detail=f"Failed to read curve: {err}")
+    if point < 0 or point >= len(state.points):
+        raise HTTPException(status_code=400, detail=f"Point index must be 0–{len(state.points)-1}")
     return _vfpoint_dict(state.points[point])
 
 
@@ -667,7 +668,7 @@ async def api_curve_write_global(req: GlobalOffsetRequest):
     if not vfp_state:
         raise HTTPException(status_code=500, detail="Failed to read curve")
 
-    all_deltas = {p.index: req.delta_khz for p in vfp_state.points}
+    all_deltas = {p.index: req.delta_khz for p in vfp_state.points if p.domain == "gpu"}
     effective_limit = req.max_delta_khz if req.max_delta_khz is not None else cfg.max_delta_khz
     errors = validate_write(all_deltas, effective_limit)
     if errors:
