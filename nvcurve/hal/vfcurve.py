@@ -71,7 +71,6 @@ def read_vfp_curve(gpu) -> tuple[Optional[list[tuple[int, int]]], str]:
     def fill(buf):
         for i in range(32):
             buf[4 + i] = mask[i]
-        struct.pack_into("<I", buf, 0x14, 15)
 
     d, err = nvcall(FUNC["GetVFPCurve"], gpu, VFP_SIZE, ver=1, pre_fill=fill)
     if not d:

@@ -387,7 +387,6 @@ def _read_vfp_with_mask(gpu, mask: Optional[BoostMask]) -> Optional[List[Tuple[i
     """Read VFP curve using the canonical boost mask."""
     def fill(buf):
         _fill_mask_from_boost(buf, mask)
-        struct.pack_into("<I", buf, 0x14, 15)
 
     d, err = nvcall(FUNC["GetVFPCurve"], gpu, VFP_SIZE, ver=1, pre_fill=fill)
     if not d:
@@ -422,7 +421,6 @@ def read_vfp_curve(gpu, mask: Optional[BoostMask] = None,
     """
     def fill(buf):
         _fill_mask_from_boost(buf, mask)
-        struct.pack_into("<I", buf, 0x14, 15)
 
     d, err = nvcall(FUNC["GetVFPCurve"], gpu, VFP_SIZE, ver=1, pre_fill=fill)
     if not d:
@@ -782,8 +780,6 @@ def run_diagnostics(gpu, gpu_name, mask: Optional[BoostMask] = None):
         def fill(buf, _fid=fid, _mask=use_mask):
             if _fid in needs_mask_fns and _mask:
                 _fill_mask_from_boost(buf, _mask)
-            if _fid == FUNC["GetVFPCurve"]:
-                struct.pack_into("<I", buf, 0x14, 15)
 
         d, err = nvcall(fid, gpu, size, ver=ver, pre_fill=fill)
         status = f"OK ({len(d)} bytes)" if d else f"FAILED: {err}"
@@ -805,8 +801,6 @@ def run_diagnostics(gpu, gpu_name, mask: Optional[BoostMask] = None):
     #         def fill_ff(buf, _fid=fid):
     #             for i in range(MASK_OFFSET, MASK_OFFSET + MASK_BYTES):
     #                 buf[i] = 0xFF
-    #             if _fid == FUNC["GetVFPCurve"]:
-    #                 struct.pack_into("<I", buf, 0x14, 15)
 
     #         d, err = nvcall(fid, gpu, size, ver=ver, pre_fill=fill_ff)
     #         status = f"OK ({len(d)} bytes)" if d else f"FAILED: {err}"
@@ -1317,7 +1311,6 @@ def cmd_read(gpu, gpu_name, args, mask, curve_info):
     if args.raw:
         def fill_vfp(buf):
             _fill_mask_from_boost(buf, mask)
-            struct.pack_into("<I", buf, 0x14, 15)
         vfp_raw, _ = nvcall(FUNC["GetVFPCurve"], gpu, VFP_SIZE,
                              ver=1, pre_fill=fill_vfp)
         ct_raw, _ = read_clock_table_raw(gpu, mask)

@@ -266,8 +266,6 @@ def run_diagnostics(gpu, gpu_name):
             if _nm and _mask:
                 for i in range(32):
                     buf[4 + i] = _mask[i]
-            if _fid == FUNC["GetVFPCurve"]:
-                struct.pack_into("<I", buf, 0x14, 15)
 
         d, err = nvcall(fid, gpu, size, ver=ver, pre_fill=fill)
         status = f"OK ({len(d)} bytes)" if d else f"FAILED: {err}"
@@ -434,7 +432,6 @@ def cmd_read(args, client: NvCurveClient):
             if mask_bytes:
                 for i in range(32):
                     buf[4 + i] = mask_bytes[i]
-            struct.pack_into("<I", buf, 0x14, 15)
 
         vfp_raw, _ = nvcall(FUNC["GetVFPCurve"], gpu, VFP_SIZE, ver=1, pre_fill=fill_vfp)
         ct_raw, _ = read_clock_table_raw(gpu)
