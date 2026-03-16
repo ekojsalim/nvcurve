@@ -62,10 +62,14 @@ export const api = {
   resetLimits: () => post('/limits/reset'),
 
   /** Profile Management */
-  profiles: () => get<{ profiles: ProfileData[], active: string | null }>('/profiles'),
+  profiles: () => get<{ profiles: ProfileData[], active: string | null, auto_load: string | null }>('/profiles'),
   saveProfile: (name: string) => post<{ ok: boolean; filepath: string }>('/profiles', { name }),
   applyProfile: (name: string) => post(`/profiles/${encodeURIComponent(name)}/apply`),
   deleteProfile: (name: string) => del(`/profiles/${encodeURIComponent(name)}`),
   renameProfile: (oldName: string, newName: string) =>
     post(`/profiles/${encodeURIComponent(oldName)}/rename`, { new_name: newName }),
+
+  /** Server config */
+  setAutoLoadProfile: (name: string | null) =>
+    post<{ ok: boolean; auto_load_profile: string | null }>('/config', { auto_load_profile: name }),
 };

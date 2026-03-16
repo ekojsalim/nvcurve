@@ -5,7 +5,7 @@ Normal use (no root required):
     nvcurve read [--full|--json]                   Read V/F curve
     nvcurve write [--point N|--range A-B|--global|--reset] --delta D [--dry-run]
     nvcurve verify --point N --delta D             Write-verify cycle
-    nvcurve snapshot [save|restore|list]           Manage snapshots
+    nvcurve snapshot [save|restore|list]           Manage snapshots (server-optional)
     nvcurve profile [save|apply|list]              Manage profiles
     nvcurve serve start [--detach]                 Start server (escalates to root)
     nvcurve serve stop                             Stop running server
@@ -17,7 +17,8 @@ Normal use (no root required):
     nvcurve service restart                        Restart systemd service (escalates to root)
     nvcurve service status                         Check systemd service status
 
-Diagnostic commands (bypass server, escalate to root):
+First-time / diagnostic commands (bypass server, escalate to root):
+    nvcurve setup                                  Hardware compatibility check (diag + verify + restore)
     nvcurve read --diag                            Probe all NvAPI functions
     nvcurve read --raw                             Raw hex dumps of hardware buffers
     nvcurve inspect [--point N|--range A-B]        Raw ClockBoostTable field detail
@@ -225,11 +226,27 @@ def output_json(gpu_name, points, offsets, voltage, domains=None):
 def run_diagnostics(gpu, gpu_name):
     """Probe all known NvAPI functions and report results."""
     from .hal.vfcurve import get_boost_mask
+    from .hal.monitoring import init_nvml, get_driver_version, get_vram_total
+    from .hal.limits import get_power_limit, get_clock_offsets, get_mem_offset_range
     from .nvapi.bootstrap import nvcall, query_interface
     from .nvapi.constants import FUNC, MASK_SIZE, VOLT_SIZE, RANGES_SIZE, PERF_SIZE, VBOOST_SIZE
 
-    print(f"GPU: {gpu_name}")
+    init_nvml()  # best-effort; diagnostics degrade gracefully without it
+
+    # ── System info ───────────────────────────────────────────────────────────
+    print("=== System ===")
     print()
+    driver = get_driver_version()
+    vram = get_vram_total(0)
+    print(f"  GPU:     {gpu_name}")
+    print(f"  Driver:  {driver or '(unavailable — NVML not initialised)'}")
+    if vram is not None:
+        print(f"  VRAM:    {vram / (1024 ** 3):.1f} GiB  ({vram:,} bytes)")
+    else:
+        print("  VRAM:    (unavailable)")
+    print()
+
+    # ── Function probe ────────────────────────────────────────────────────────
     print("=== Function probe ===")
     print()
 
@@ -249,11 +266,11 @@ def run_diagnostics(gpu, gpu_name):
         resolved = "resolved" if ptr else "NOT FOUND"
         print(f"  {name:30s}  0x{fid:08X}  size=0x{size:04X}  ver={ver}  {resolved}")
 
+    # ── Read function tests ───────────────────────────────────────────────────
     mask_bytes = None
-    mask_err = ""
     print()
     print("=== Read function tests ===")
-    
+
     mask_bytes, mask_err = get_boost_mask(gpu)
     if not mask_bytes:
         print(f"  WARNING: Failed to get boost mask: {mask_err}")
@@ -273,6 +290,53 @@ def run_diagnostics(gpu, gpu_name):
         if d:
             vw = struct.unpack_from("<I", d, 0)[0]
             print(f"    version_word = 0x{vw:08X}")
+
+    # ── Boost mask ────────────────────────────────────────────────────────────
+    print()
+    print("=== Boost mask ===")
+    print()
+    if mask_bytes:
+        active = [i for i in range(len(mask_bytes) * 8) if mask_bytes[i // 8] & (1 << (i % 8))]
+        print(f"  Raw (hex):     {mask_bytes.hex()}")
+        if active:
+            print(f"  Active points: {len(active)} of {len(mask_bytes) * 8}"
+                  f"  (indices {active[0]}–{active[-1]})")
+        else:
+            print(f"  Active points: 0 of {len(mask_bytes) * 8}")
+    else:
+        print(f"  WARNING: Could not read boost mask: {mask_err}")
+
+    # ── Clock offsets & ranges ────────────────────────────────────────────────
+    print()
+    print("=== Clock offsets & ranges ===")
+    print()
+    offsets = get_clock_offsets(0)
+    mem_range = get_mem_offset_range(0)
+    gpc_cur = offsets.get("gpc_offset_mhz")
+    mem_cur = offsets.get("mem_offset_mhz")
+    mem_min = mem_range.get("min_mem_offset_mhz")
+    mem_max = mem_range.get("max_mem_offset_mhz")
+    gpc_cur_s = f"{gpc_cur:+d} MHz" if gpc_cur is not None else "unavailable"
+    mem_cur_s = f"{mem_cur:+d} MHz" if mem_cur is not None else "unavailable"
+    mem_range_s = (f"{mem_min:+d} / {mem_max:+d} MHz"
+                   if mem_min is not None and mem_max is not None else "unavailable")
+    print(f"  GPC (core) offset:  {gpc_cur_s}  (range: ±1000 MHz safety cap)")
+    print(f"  Memory offset:      {mem_cur_s}  (range: {mem_range_s})")
+
+    # ── Power limits ──────────────────────────────────────────────────────────
+    print()
+    print("=== Power limits ===")
+    print()
+    pwr = get_power_limit(0)
+    cur_w  = pwr.get("power_limit_w")
+    def_w  = pwr.get("default_power_limit_w")
+    min_w  = pwr.get("min_power_limit_w")
+    max_w  = pwr.get("max_power_limit_w")
+    def fmt_w(v): return f"{v} W" if v is not None else "unavailable"
+    print(f"  Current:  {fmt_w(cur_w)}")
+    print(f"  Default:  {fmt_w(def_w)}")
+    if min_w is not None and max_w is not None:
+        print(f"  Range:    {min_w} – {max_w} W")
 
 
 # ── Privilege / browser helpers ───────────────────────────────────────────────
@@ -759,7 +823,16 @@ def cmd_snapshot(args, client: NvCurveClient):
         try:
             result = client.snapshot_save()
         except ServerNotRunning:
-            _server_not_running(client._base)
+            print("(server not running — saving snapshot directly)", file=sys.stderr)
+            require_root()
+            from .hal.gpu import get_gpu
+            from .hal.snapshot import save as _snapshot_save
+            gpu, gpu_name = get_gpu(index=0)
+            path = _snapshot_save(gpu, gpu_name, default_config.snapshot_dir, default_config.max_snapshots)
+            if path is None:
+                print("Failed to save snapshot.", file=sys.stderr)
+                sys.exit(1)
+            print(f"Snapshot saved: {path}")
             return
         except ApiError as e:
             print(f"Snapshot save failed: {e.detail}")
@@ -770,7 +843,16 @@ def cmd_snapshot(args, client: NvCurveClient):
         try:
             client.snapshot_restore(filepath=args.file)
         except ServerNotRunning:
-            _server_not_running(client._base)
+            print("(server not running — restoring snapshot directly)", file=sys.stderr)
+            require_root()
+            from .hal.gpu import get_gpu
+            from .hal.snapshot import restore as _snapshot_restore
+            gpu, _ = get_gpu(index=0)
+            ok = _snapshot_restore(gpu, default_config.snapshot_dir, args.file)
+            if not ok:
+                print("Restore failed — no snapshot found.", file=sys.stderr)
+                sys.exit(1)
+            print("Snapshot restored.")
             return
         except ApiError as e:
             print(f"Restore failed: {e.detail}")
@@ -781,8 +863,13 @@ def cmd_snapshot(args, client: NvCurveClient):
         try:
             snapshots = client.snapshots()
         except ServerNotRunning:
-            _server_not_running(client._base)
-            return
+            from .hal.snapshot import list_snapshots as _list_snapshots
+            raw = _list_snapshots(default_config.snapshot_dir)
+            snapshots = [
+                {"filepath": s.filepath, "timestamp": s.timestamp,
+                 "gpu": s.gpu, "nonzero_offsets": s.nonzero_offsets}
+                for s in raw
+            ]
         if not snapshots:
             print("No snapshots found.")
             return
@@ -839,6 +926,129 @@ def cmd_profile(args, client: NvCurveClient):
         print(f"Applied profile '{args.name}'.")
 
 
+def cmd_setup(args):
+    """One-shot hardware compatibility check: diag → read → write-verify → restore."""
+    verify_point = getattr(args, "point", 80) or 80
+    verify_delta_mhz = getattr(args, "delta", 5.0) or 5.0
+    verify_delta_khz = int(verify_delta_mhz * 1000)
+
+    require_root()
+
+    from .hal.gpu import get_gpu
+    from .hal.vfcurve import read_curve, read_clock_offsets, write_offsets
+    from .hal.monitoring import read_voltage
+    from .hal.snapshot import save as snapshot_save, restore as snapshot_restore
+
+    sep = "─" * 60
+
+    print(sep)
+    print("  NVCurve Setup — Hardware Compatibility Check")
+    print(sep)
+    print()
+
+    gpu, gpu_name = get_gpu(index=0)
+
+    # ── Step 1: NvAPI diagnostics ──────────────────────────────────────────────
+    print("Step 1/4  NvAPI function probe")
+    print()
+    run_diagnostics(gpu, gpu_name)
+    print()
+
+    # ── Step 2: read current curve ─────────────────────────────────────────────
+    print("Step 2/4  Current V/F curve")
+    print()
+    curve_state, curve_err = read_curve(gpu, gpu_name)
+    if not curve_state:
+        print(f"FAILED to read V/F curve: {curve_err}", file=sys.stderr)
+        sys.exit(1)
+    voltage, _ = read_voltage(gpu)
+    pts = [(p.freq_khz, p.volt_uv) for p in curve_state.points]
+    offsets = [p.delta_khz for p in curve_state.points]
+    domains = [p.domain for p in curve_state.points]
+    print_curve(pts, offsets, voltage, domains=domains)
+    print()
+
+    # ── Step 3: write-verify cycle ─────────────────────────────────────────────
+    if verify_point >= len(curve_state.points):
+        print(f"Step 3/4  Write-verify  (SKIPPED — point {verify_point} not present; "
+              f"GPU has {len(curve_state.points)} points)")
+        print()
+        print(sep)
+        print("  RESULT: Diagnostics passed. Write-verify skipped.")
+        print(f"  Use --point to specify a valid point index (0–{len(curve_state.points) - 1}).")
+        print(sep)
+        return
+
+    print(f"Step 3/4  Write-verify  ({verify_delta_mhz:+.0f} MHz at point {verify_point})")
+    print()
+
+    snap_path = snapshot_save(gpu, gpu_name, default_config.snapshot_dir, default_config.max_snapshots)
+    if snap_path:
+        print(f"  Snapshot saved: {snap_path}")
+
+    before_offsets, err = read_clock_offsets(gpu)
+    if before_offsets is None:
+        print(f"  FAILED to read state before write: {err}", file=sys.stderr)
+        sys.exit(1)
+
+    ret, desc = write_offsets(gpu, {verify_point: verify_delta_khz})
+    if ret != 0:
+        print(f"  Write FAILED ({ret}): {desc}")
+        print()
+        print(sep)
+        print("  RESULT: Write path is NOT working on this configuration.")
+        print(sep)
+        sys.exit(1)
+
+    time.sleep(0.2)
+
+    after_offsets, err = read_clock_offsets(gpu)
+    if after_offsets is None:
+        print(f"  Verification read FAILED: {err}", file=sys.stderr)
+        sys.exit(1)
+
+    actual = after_offsets[verify_point]
+    matched = actual == verify_delta_khz
+    collateral = [
+        i for i in range(min(len(before_offsets), len(after_offsets)))
+        if i != verify_point and before_offsets[i] != after_offsets[i]
+    ]
+
+    if matched:
+        print(f"  Point {verify_point}: {verify_delta_khz / 1000:+.0f} MHz  OK")
+    else:
+        print(f"  Point {verify_point}: MISMATCH — expected {verify_delta_khz / 1000:+.0f} MHz, "
+              f"got {actual / 1000:+.0f} MHz")
+    if collateral:
+        print(f"  WARNING: {len(collateral)} collateral point(s) changed: {collateral[:5]}")
+    else:
+        print("  No collateral changes")
+
+    # ── Step 4: restore ────────────────────────────────────────────────────────
+    print()
+    print("Step 4/4  Restoring snapshot")
+    print()
+    ok = snapshot_restore(gpu, default_config.snapshot_dir, snap_path)
+    if ok:
+        print("  Hardware state restored to baseline.")
+    else:
+        print("  WARNING: Restore failed. Run:  nvcurve snapshot restore", file=sys.stderr)
+
+    print()
+    print(sep)
+    if matched and not collateral:
+        print("  RESULT: Compatible. NVCurve is ready to use.")
+        print()
+        print("  Next:  nvcurve                  launch web UI")
+        print("         nvcurve service install   auto-start on boot")
+    elif not matched:
+        print("  RESULT: Write verification FAILED — this configuration is not supported.")
+    else:
+        print("  RESULT: Write applied but unexpected collateral changes detected.")
+        print("  Review the output above before using write operations.")
+    print(sep)
+
+
 def cmd_service(args):
     """Manage the nvcurve systemd service."""
     action = getattr(args, "action", None)
@@ -856,6 +1066,11 @@ def cmd_service(args):
 
         host = getattr(args, "host", "127.0.0.1")
         port = getattr(args, "port", 8042)
+        auto_load_profile = getattr(args, "auto_load_profile", None)
+
+        exec_start = f"{exec_cmd} serve start --host {host} --port {port}"
+        if auto_load_profile:
+            exec_start += f" --auto-load-profile {auto_load_profile}"
 
         unit = (
             "[Unit]\n"
@@ -865,7 +1080,7 @@ def cmd_service(args):
             "\n"
             "[Service]\n"
             "Type=simple\n"
-            f"ExecStart={exec_cmd} serve start --host {host} --port {port}\n"
+            f"ExecStart={exec_start}\n"
             "Restart=on-failure\n"
             "RestartSec=5\n"
             "Environment=PYTHONDONTWRITEBYTECODE=1\n"
@@ -881,8 +1096,11 @@ def cmd_service(args):
         # Write persistent config so clients can discover host:port without the
         # runtime info file (e.g. before the service has started, after reboot).
         os.makedirs("/etc/nvcurve", exist_ok=True)
+        persistent_cfg: dict = {"host": host, "port": port}
+        if auto_load_profile:
+            persistent_cfg["auto_load_profile"] = auto_load_profile
         with open(_PERSISTENT_CONFIG_FILE, "w") as f:
-            json.dump({"host": host, "port": port}, f)
+            json.dump(persistent_cfg, f)
         print(f"Persistent config written to {_PERSISTENT_CONFIG_FILE}")
 
         try:
@@ -996,6 +1214,9 @@ def _cmd_serve_start(args, cfg: Config, open_browser: bool = False) -> None:
 
     host = getattr(args, "host", cfg.host)
     port = getattr(args, "port", cfg.port)
+    auto_load_profile = getattr(args, "auto_load_profile", None)
+    if auto_load_profile:
+        cfg.auto_load_profile = auto_load_profile
 
     # Warn if a systemd-managed server is already active — running a second
     # instance alongside it will cause port conflicts or split-brain state.
@@ -1031,6 +1252,8 @@ def _cmd_serve_start(args, cfg: Config, open_browser: bool = False) -> None:
                "--host", host, "--port", str(port)]
         if getattr(args, "gpu_index", 0):
             cmd += ["--gpu", str(args.gpu_index)]
+        if auto_load_profile:
+            cmd += ["--auto-load-profile", auto_load_profile]
 
         log_path = _log_file()
         print("Starting nvcurve server in background...")
@@ -1138,6 +1361,14 @@ Examples:
     p_ver.add_argument("--delta", type=float, required=True,
                        help="Frequency offset in MHz")
 
+    # setup
+    p_setup = sub.add_parser("setup",
+                              help="Hardware compatibility check: diag → read → write-verify → restore (needs root)")
+    p_setup.add_argument("--point", type=int, default=80,
+                         help="Point index to use for write-verify test (default: 80)")
+    p_setup.add_argument("--delta", type=float, default=5.0,
+                         help="Offset in MHz to use for write-verify test (default: +5)")
+
     # snapshot
     p_snap = sub.add_parser("snapshot",
                              help="Save/restore/list ClockBoostTable snapshots")
@@ -1162,6 +1393,8 @@ Examples:
                          help="GPU index (default 0)")
     p_start.add_argument("--detach", "-d", action="store_true",
                          help="Run in background")
+    p_start.add_argument("--auto-load-profile", default=None, metavar="NAME",
+                         help="Apply this profile on server startup")
 
     s_srv.add_parser("stop", help="Stop the running server")
     s_srv.add_parser("status", help="Check server status")
@@ -1176,6 +1409,8 @@ Examples:
                            help="Server bind address")
     p_install.add_argument("--port", type=int, default=8042,
                            help="Server port")
+    p_install.add_argument("--auto-load-profile", default=None, metavar="NAME",
+                           help="Apply this profile automatically on every service start")
 
     s_svc.add_parser("uninstall",
                      help="Remove systemd service (escalates to root)")
@@ -1245,7 +1480,9 @@ def main():
                 print(f"Server is NOT running at {base_url}")
         return
 
-    if args.command == "read":
+    if args.command == "setup":
+        cmd_setup(args)
+    elif args.command == "read":
         cmd_read(args, client)
     elif args.command == "inspect":
         cmd_inspect(args)

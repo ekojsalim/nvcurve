@@ -195,6 +195,23 @@ async def lifespan(app: FastAPI):
     if offsets:
         _state["last_offsets"] = offsets
 
+    # Auto-load profile if configured
+    cfg: Config = _state["config"]
+    if cfg.auto_load_profile:
+        log.info("Auto-loading profile: %r", cfg.auto_load_profile)
+        try:
+            errs = await _apply_profile(cfg.auto_load_profile)
+            if errs:
+                log.warning("Auto-load profile %r applied with errors: %s",
+                            cfg.auto_load_profile, "; ".join(errs))
+            else:
+                log.info("Auto-load profile %r applied successfully", cfg.auto_load_profile)
+        except FileNotFoundError:
+            log.warning("Auto-load profile %r not found in %s — skipping",
+                        cfg.auto_load_profile, cfg.profile_dir)
+        except Exception as exc:
+            log.warning("Auto-load profile %r failed: %s — skipping", cfg.auto_load_profile, exc)
+
     # Start background monitor poller
     poller_task = asyncio.create_task(_monitor_poller())
 
@@ -252,6 +269,10 @@ class ProfileSaveRequest(BaseModel):
 
 class ProfileRenameRequest(BaseModel):
     new_name: str
+
+
+class ConfigUpdateRequest(BaseModel):
+    auto_load_profile: str | None = None
 
 
 # ── Helper: run blocking HAL call in thread pool ──────────────────────────────
@@ -356,12 +377,44 @@ async def api_snapshots():
     ]
 
 
+def _persist_config_field(key: str, value) -> None:
+    """Write a single key into /etc/nvcurve/config.json if the file exists.
+
+    The file is created by `service install`. If it doesn't exist (e.g. the
+    service was never installed), config changes are in-memory only for the
+    current server session. Silently ignores errors.
+    """
+    import json as _json
+    import os as _os
+    config_path = "/etc/nvcurve/config.json"
+    if not _os.path.exists(config_path):
+        return
+    try:
+        with open(config_path) as f:
+            data = _json.load(f)
+    except Exception:
+        data = {}
+    if value is not None:
+        data[key] = value
+    else:
+        data.pop(key, None)
+    try:
+        with open(config_path, "w") as f:
+            _json.dump(data, f)
+    except Exception as exc:
+        log.warning("Failed to persist config field %r: %s", key, exc)
+
+
 @app.get("/api/profiles")
 async def api_profiles():
-    """List saved native profiles and the currently active profile name."""
+    """List saved native profiles, the active profile name, and the auto-load profile name."""
     cfg: Config = _state["config"]
     profiles = await _run(list_profiles, cfg.profile_dir)
-    return {"profiles": profiles, "active": _state["active_profile"]}
+    return {
+        "profiles": profiles,
+        "active": _state["active_profile"],
+        "auto_load": cfg.auto_load_profile,
+    }
 
 
 @app.post("/api/profiles")
@@ -397,23 +450,24 @@ async def api_profile_save(req: ProfileSaveRequest):
     return {"ok": True, "filepath": filepath}
 
 
-@app.post("/api/profiles/{name}/apply")
-async def api_profile_apply(name: str):
-    """Apply a saved profile to hardware (curve deltas + limits)."""
+async def _apply_profile(name: str) -> list[str]:
+    """Load and apply a saved profile to hardware.
+
+    Returns a list of error strings. An empty list means success.
+    Raises FileNotFoundError if the profile file does not exist.
+    Sets _state["active_profile"] on full success.
+    """
     import os as _os
-    gpu = _require_gpu()
+    gpu = _state["gpu"]
     cfg: Config = _state["config"]
 
     safe_name = "".join(c for c in name if c.isalnum() or c in " _-()").strip()
     filepath = _os.path.join(cfg.profile_dir, f"{safe_name}.json")
-    try:
-        profile = await _run(load_profile, filepath)
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail=f"Profile '{name}' not found")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to load profile: {e}")
 
-    errs = []
+    # Let FileNotFoundError propagate so callers can map it to 404 or a warning.
+    profile = await _run(load_profile, filepath)
+
+    errs: list[str] = []
 
     # Apply mem offset first — driver may reset curve table as a side-effect.
     if profile.mem_offset_mhz is not None:
@@ -444,9 +498,23 @@ async def api_profile_apply(name: str):
 
         await _update_offsets_and_broadcast(gpu)
 
+    if not errs:
+        _state["active_profile"] = name
+    return errs
+
+
+@app.post("/api/profiles/{name}/apply")
+async def api_profile_apply(name: str):
+    """Apply a saved profile to hardware (curve deltas + limits)."""
+    _require_gpu()
+    try:
+        errs = await _apply_profile(name)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Profile '{name}' not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load profile: {e}")
     if errs:
         raise HTTPException(status_code=500, detail="; ".join(errs))
-    _state["active_profile"] = name
     return {"ok": True}
 
 
@@ -459,6 +527,9 @@ async def api_profile_delete(name: str):
         raise HTTPException(status_code=404, detail=f"Profile '{name}' not found")
     if _state["active_profile"] == name:
         _state["active_profile"] = None
+    if cfg.auto_load_profile == name:
+        cfg.auto_load_profile = None
+        _persist_config_field("auto_load_profile", None)
     return {"ok": True}
 
 
@@ -473,7 +544,26 @@ async def api_profile_rename(name: str, req: ProfileRenameRequest):
         raise HTTPException(status_code=404, detail=f"Profile '{name}' not found")
     if _state["active_profile"] == name:
         _state["active_profile"] = req.new_name.strip()
+    if cfg.auto_load_profile == name:
+        cfg.auto_load_profile = req.new_name.strip()
+        _persist_config_field("auto_load_profile", cfg.auto_load_profile)
     return {"ok": True}
+
+
+@app.get("/api/config")
+async def api_config_get():
+    """Get mutable server configuration."""
+    cfg: Config = _state["config"]
+    return {"auto_load_profile": cfg.auto_load_profile}
+
+
+@app.post("/api/config")
+async def api_config_update(req: ConfigUpdateRequest):
+    """Update mutable server configuration. Changes persist to /etc/nvcurve/config.json if present."""
+    cfg: Config = _state["config"]
+    cfg.auto_load_profile = req.auto_load_profile or None
+    _persist_config_field("auto_load_profile", cfg.auto_load_profile)
+    return {"ok": True, "auto_load_profile": cfg.auto_load_profile}
 
 
 @app.get("/api/limits")

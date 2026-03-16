@@ -2,6 +2,7 @@
 
 import os
 from dataclasses import dataclass, field
+from typing import Optional
 
 
 @dataclass
@@ -20,6 +21,9 @@ class Config:
 
     snapshot_dir: str = "/var/cache/nvcurve/snapshots"
     profile_dir: str = "/etc/nvcurve/profiles"
+
+    # Profile auto-load: apply this profile name on server startup (None = disabled)
+    auto_load_profile: Optional[str] = None
 
 
 # Module-level default config instance.
