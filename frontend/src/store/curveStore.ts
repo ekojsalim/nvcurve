@@ -7,6 +7,8 @@ const HISTORY_SIZE = 120; // ~60s at 2Hz
 
 interface CurveStore {
   // Hardware state (from API)
+  availableGpus: GpuInfo[];
+  selectedGpuIndex: number;
   curve: CurveState | null;
   gpuInfo: GpuInfo | null;
   monitor: MonitoringSample | null;
@@ -27,6 +29,8 @@ interface CurveStore {
   anchorPoint: number | null;
 
   // Hardware state setters
+  setAvailableGpus: (gpus: GpuInfo[]) => void;
+  setSelectedGpuIndex: (index: number) => void;
   setCurve: (c: CurveState) => void;
   setGpuInfo: (g: GpuInfo) => void;
   pushMonitor: (s: MonitoringSample) => void;
@@ -63,6 +67,8 @@ interface CurveStore {
 }
 
 export const useCurveStore = create<CurveStore>()((set, get) => ({
+  availableGpus: [],
+  selectedGpuIndex: 0,
   curve: null,
   gpuInfo: null,
   monitor: null,
@@ -72,6 +78,10 @@ export const useCurveStore = create<CurveStore>()((set, get) => ({
   selectedPoints: new Set(),
   anchorPoint: null,
 
+  setAvailableGpus: (availableGpus) => set({ availableGpus }),
+  setSelectedGpuIndex: (selectedGpuIndex) => {
+    set({ selectedGpuIndex, curve: null, gpuInfo: null, monitor: null, monitorHistory: [], pendingDeltas: new Map(), selectedPoints: new Set(), anchorPoint: null });
+  },
   setCurve: (curve) => set({ curve }),
   setGpuInfo: (gpuInfo) => set({ gpuInfo }),
   setActiveProfile: (activeProfile) => set({ activeProfile }),
@@ -121,7 +131,7 @@ export const useCurveStore = create<CurveStore>()((set, get) => ({
     set({ pendingDeltas: new Map(), selectedPoints: new Set(), anchorPoint: null }),
 
   applyEdits: async (onSuccess) => {
-    const { pendingDeltas } = get();
+    const { pendingDeltas, selectedGpuIndex } = get();
     if (pendingDeltas.size === 0) return;
 
     // Convert Map to plain record for the API
@@ -129,7 +139,7 @@ export const useCurveStore = create<CurveStore>()((set, get) => ({
     pendingDeltas.forEach((v, k) => { deltas[k] = v; });
 
     try {
-      const result = await api.writeDeltas(deltas);
+      const result = await api.writeDeltas(deltas, selectedGpuIndex);
       set({ pendingDeltas: new Map(), selectedPoints: new Set(), activeProfile: null });
       if (result?.freq_warnings?.length) {
         toast.warning('Curve applied — driver clamped some points to 0 MHz (negative freq delta)');
@@ -143,8 +153,9 @@ export const useCurveStore = create<CurveStore>()((set, get) => ({
   },
 
   resetAllDeltas: async (onSuccess) => {
+    const { selectedGpuIndex } = get();
     try {
-      await api.resetCurve();
+      await api.resetCurve(selectedGpuIndex);
       set({ pendingDeltas: new Map(), selectedPoints: new Set(), activeProfile: null });
       toast.success('Curve reset to hardware defaults');
       onSuccess();

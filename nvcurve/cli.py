@@ -476,7 +476,7 @@ def cmd_read(args, client: NvCurveClient):
     if args.diag:
         require_root()
         from .hal.gpu import get_gpu
-        gpu, gpu_name = get_gpu(index=0)
+        gpu, gpu_name = get_gpu(index=getattr(args, "gpu_index", 0))
         run_diagnostics(gpu, gpu_name)
         return
 
@@ -487,7 +487,7 @@ def cmd_read(args, client: NvCurveClient):
         from .hal.monitoring import read_voltage
         from .nvapi.bootstrap import nvcall
         from .nvapi.constants import FUNC
-        gpu, gpu_name = get_gpu(index=0)
+        gpu, gpu_name = get_gpu(index=getattr(args, "gpu_index", 0))
 
         print(f"GPU: {gpu_name}")
 
@@ -538,7 +538,7 @@ def cmd_read(args, client: NvCurveClient):
         from .hal.gpu import get_gpu
         from .hal.vfcurve import read_curve
         from .hal.monitoring import read_voltage as _read_voltage
-        gpu, gpu_name = get_gpu(index=0)
+        gpu, gpu_name = get_gpu(index=getattr(args, "gpu_index", 0))
         curve_state, curve_err = read_curve(gpu, gpu_name)
         if not curve_state:
             print(f"Failed to read V/F curve: {curve_err}")
@@ -564,7 +564,7 @@ def cmd_inspect(args):
     from .hal.gpu import get_gpu
     from .hal.vfcurve import read_clock_table_raw, read_clock_entry_full, read_curve
 
-    gpu, gpu_name = get_gpu(index=0)
+    gpu, gpu_name = get_gpu(index=getattr(args, "gpu_index", 0))
     raw, err = read_clock_table_raw(gpu)
     if not raw:
         print(f"Failed to read ClockBoostTable: {err}")
@@ -743,7 +743,7 @@ def cmd_verify(args, client: NvCurveClient):
 
     point_deltas = {p: delta_khz for p in points}
 
-    gpu, gpu_name = get_gpu(index=0)
+    gpu, gpu_name = get_gpu(index=getattr(args, "gpu_index", 0))
 
     print("=== Write-Verify Cycle ===")
     print(f"GPU:    {gpu_name}")
@@ -827,7 +827,7 @@ def cmd_snapshot(args, client: NvCurveClient):
             require_root()
             from .hal.gpu import get_gpu
             from .hal.snapshot import save as _snapshot_save
-            gpu, gpu_name = get_gpu(index=0)
+            gpu, gpu_name = get_gpu(index=getattr(args, "gpu_index", 0))
             path = _snapshot_save(gpu, gpu_name, default_config.snapshot_dir, default_config.max_snapshots)
             if path is None:
                 print("Failed to save snapshot.", file=sys.stderr)
@@ -847,7 +847,7 @@ def cmd_snapshot(args, client: NvCurveClient):
             require_root()
             from .hal.gpu import get_gpu
             from .hal.snapshot import restore as _snapshot_restore
-            gpu, _ = get_gpu(index=0)
+            gpu, _ = get_gpu(index=getattr(args, "gpu_index", 0))
             ok = _snapshot_restore(gpu, default_config.snapshot_dir, args.file)
             if not ok:
                 print("Restore failed — no snapshot found.", file=sys.stderr)
@@ -888,14 +888,33 @@ def cmd_profile(args, client: NvCurveClient):
             return
         profiles = data.get("profiles", [])
         active = data.get("active")
+        auto_load = data.get("auto_load")
         if not profiles:
             print("No profiles found.")
             return
         print("Profiles:")
         for p in profiles:
-            marker = "  *" if p["name"] == active else ""
+            markers = []
+            if p["name"] == active: markers.append("active")
+            if p["name"] == auto_load: markers.append("auto-load")
+            marker_str = f"  [{', '.join(markers)}]" if markers else ""
             pts = len(p["curve_deltas"])
-            print(f"  - {p['name']} ({pts} pts){marker}")
+            print(f"  - {p['name']} ({pts} pts){marker_str}")
+
+    elif args.action == "auto-load":
+        try:
+            if getattr(args, "clear", False):
+                client.config_update(None)
+                print("Auto-load profile cleared.")
+            elif not args.name:
+                print("Error: --name required for profile auto-load (or use --clear)")
+                return
+            else:
+                client.config_update(args.name)
+                print(f"Auto-load profile set to '{args.name}'.")
+        except ServerNotRunning:
+            _server_not_running(client._base)
+            return
 
     elif args.action == "save":
         if not args.name:
@@ -946,7 +965,7 @@ def cmd_setup(args):
     print(sep)
     print()
 
-    gpu, gpu_name = get_gpu(index=0)
+    gpu, gpu_name = get_gpu(index=getattr(args, "gpu_index", 0))
 
     # ── Step 1: NvAPI diagnostics ──────────────────────────────────────────────
     print("Step 1/4  NvAPI function probe")
@@ -1066,11 +1085,8 @@ def cmd_service(args):
 
         host = getattr(args, "host", "127.0.0.1")
         port = getattr(args, "port", 8042)
-        auto_load_profile = getattr(args, "auto_load_profile", None)
 
         exec_start = f"{exec_cmd} serve start --host {host} --port {port}"
-        if auto_load_profile:
-            exec_start += f" --auto-load-profile {auto_load_profile}"
 
         unit = (
             "[Unit]\n"
@@ -1096,9 +1112,13 @@ def cmd_service(args):
         # Write persistent config so clients can discover host:port without the
         # runtime info file (e.g. before the service has started, after reboot).
         os.makedirs("/etc/nvcurve", exist_ok=True)
-        persistent_cfg: dict = {"host": host, "port": port}
-        if auto_load_profile:
-            persistent_cfg["auto_load_profile"] = auto_load_profile
+        persistent_cfg: dict = {}
+        try:
+            with open(_PERSISTENT_CONFIG_FILE) as f:
+                persistent_cfg = json.load(f)
+        except Exception:
+            pass
+        persistent_cfg.update({"host": host, "port": port})
         with open(_PERSISTENT_CONFIG_FILE, "w") as f:
             json.dump(persistent_cfg, f)
         print(f"Persistent config written to {_PERSISTENT_CONFIG_FILE}")
@@ -1214,9 +1234,6 @@ def _cmd_serve_start(args, cfg: Config, open_browser: bool = False) -> None:
 
     host = getattr(args, "host", cfg.host)
     port = getattr(args, "port", cfg.port)
-    auto_load_profile = getattr(args, "auto_load_profile", None)
-    if auto_load_profile:
-        cfg.auto_load_profile = auto_load_profile
 
     # Warn if a systemd-managed server is already active — running a second
     # instance alongside it will cause port conflicts or split-brain state.
@@ -1252,8 +1269,6 @@ def _cmd_serve_start(args, cfg: Config, open_browser: bool = False) -> None:
                "--host", host, "--port", str(port)]
         if getattr(args, "gpu_index", 0):
             cmd += ["--gpu", str(args.gpu_index)]
-        if auto_load_profile:
-            cmd += ["--auto-load-profile", auto_load_profile]
 
         log_path = _log_file()
         print("Starting nvcurve server in background...")
@@ -1322,6 +1337,10 @@ Examples:
         "--server", default=None, metavar="URL",
         help="Server base URL (default: http://127.0.0.1:8042)",
     )
+    parser.add_argument(
+        "--gpu", type=int, default=0, dest="gpu_index",
+        help="GPU index to target (default: 0)",
+    )
     sub = parser.add_subparsers(dest="command")
 
     # read
@@ -1376,9 +1395,10 @@ Examples:
     p_snap.add_argument("--file", help="Snapshot file path (for restore)")
 
     # profile
-    p_prof = sub.add_parser("profile", help="Save/apply/list native profiles")
-    p_prof.add_argument("action", choices=["save", "apply", "list"])
-    p_prof.add_argument("--name", help="Profile name (for save/apply)")
+    p_prof = sub.add_parser("profile", help="Manage saved clock/limit profiles")
+    p_prof.add_argument("action", choices=["save", "apply", "list", "auto-load"])
+    p_prof.add_argument("--name", help="Profile name (for save/apply/auto-load)")
+    p_prof.add_argument("--clear", action="store_true", help="Clear auto-load profile (for auto-load action)")
 
     # serve
     p_srv = sub.add_parser("serve", help="Start or manage the server directly")
@@ -1389,12 +1409,8 @@ Examples:
                          help="Bind address (default 127.0.0.1)")
     p_start.add_argument("--port", type=int, default=8042,
                          help="Port (default 8042)")
-    p_start.add_argument("--gpu", type=int, default=0, dest="gpu_index",
-                         help="GPU index (default 0)")
     p_start.add_argument("--detach", "-d", action="store_true",
                          help="Run in background")
-    p_start.add_argument("--auto-load-profile", default=None, metavar="NAME",
-                         help="Apply this profile on server startup")
 
     s_srv.add_parser("stop", help="Stop the running server")
     s_srv.add_parser("status", help="Check server status")
@@ -1409,8 +1425,6 @@ Examples:
                            help="Server bind address")
     p_install.add_argument("--port", type=int, default=8042,
                            help="Server port")
-    p_install.add_argument("--auto-load-profile", default=None, metavar="NAME",
-                           help="Apply this profile automatically on every service start")
 
     s_svc.add_parser("uninstall",
                      help="Remove systemd service (escalates to root)")
@@ -1430,8 +1444,16 @@ def main():
     args = parser.parse_args()
 
     cfg = Config()
+    try:
+        with open(_PERSISTENT_CONFIG_FILE) as f:
+            data = json.load(f)
+            if "auto_load_profile" in data:
+                cfg.auto_load_profile = data["auto_load_profile"]
+    except Exception:
+        pass
+
     base_url = args.server or _discover_server_url(cfg)
-    client = NvCurveClient(base=base_url)
+    client = NvCurveClient(base=base_url, gpu_index=getattr(args, "gpu_index", 0))
 
     # Default — no subcommand: open the web UI.
     # If the server is already running, just open a browser tab (no root needed).

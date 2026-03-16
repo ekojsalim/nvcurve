@@ -3,6 +3,7 @@ import { Save, Trash2, Check, ChevronRight, Pencil, Timer } from 'lucide-react';
 import { api } from '../../api/client';
 import type { ProfileData } from '../../types';
 import { toast } from 'sonner';
+import { useCurveStore } from '../../store/curveStore';
 
 interface ProfilePanelProps {
   activeProfile: string | null;
@@ -10,6 +11,7 @@ interface ProfilePanelProps {
 }
 
 export function ProfilePanel({ activeProfile, onProfileApplied }: ProfilePanelProps) {
+  const { selectedGpuIndex } = useCurveStore();
   const [profiles, setProfiles] = useState<ProfileData[]>([]);
   const [loading, setLoading] = useState(true);
   const [autoLoadProfile, setAutoLoadProfile] = useState<string | null>(null);
@@ -35,7 +37,7 @@ export function ProfilePanel({ activeProfile, onProfileApplied }: ProfilePanelPr
 
   async function fetchProfiles() {
     try {
-      const data = await api.profiles();
+      const data = await api.profiles(selectedGpuIndex);
       setProfiles(data.profiles);
       onProfileApplied(data.active);
       setAutoLoadProfile(data.auto_load);
@@ -57,7 +59,7 @@ export function ProfilePanel({ activeProfile, onProfileApplied }: ProfilePanelPr
     }
   }
 
-  useEffect(() => { fetchProfiles(); }, []);
+  useEffect(() => { fetchProfiles(); }, [selectedGpuIndex]);
 
   useEffect(() => {
     if (isSaveOpen) saveInputRef.current?.focus();
@@ -73,7 +75,7 @@ export function ProfilePanel({ activeProfile, onProfileApplied }: ProfilePanelPr
     if (!newName.trim()) return;
     try {
       setIsSaving(true);
-      await api.saveProfile(newName.trim());
+      await api.saveProfile(newName.trim(), selectedGpuIndex);
       toast.success(`Profile "${newName.trim()}" saved`);
       setIsSaveOpen(false);
       await fetchProfiles();
@@ -87,7 +89,7 @@ export function ProfilePanel({ activeProfile, onProfileApplied }: ProfilePanelPr
   async function handleApply(name: string) {
     try {
       setApplyingName(name);
-      await api.applyProfile(name);
+      await api.applyProfile(name, selectedGpuIndex);
       onProfileApplied(name);
       toast.success(`"${name}" applied`);
     } catch (e: any) {
@@ -276,7 +278,7 @@ export function ProfilePanel({ activeProfile, onProfileApplied }: ProfilePanelPr
                               {p.name}
                             </p>
                             {isAutoLoad && (
-                              <Timer size={11} className="text-sky-400 shrink-0" title="Auto-loads on server start" />
+                              <Timer size={11} className="text-sky-400 shrink-0" />
                             )}
                           </div>
                           {badges && <p className="text-xs text-zinc-500">{badges}</p>}

@@ -109,6 +109,10 @@ If you are running nvcurve as a systemd service, restart it afterwards to pick u
 nvcurve service restart
 ```
 
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for a complete history of changes.
+
 ## Web UI controls
 
 ### Curve editor

@@ -18,7 +18,7 @@ export default function App() {
   const gpuInfo = useGpu();
   const { curve, wsStatus: curveWsStatus } = useCurve();
   const { monitor, monitorHistory, wsStatus: monitorWsStatus } = useMonitor();
-  const { setCurve, activeProfile, setActiveProfile } = useCurveStore();
+  const { setCurve, activeProfile, setActiveProfile, selectedGpuIndex } = useCurveStore();
 
   const [activeTab, setActiveTab] = useState<'curve' | 'performance'>('curve');
   const [activeDomain, setActiveDomain] = useState<'gpu' | 'memory'>('gpu');
@@ -28,7 +28,7 @@ export default function App() {
   const currentVoltageMv = monitor?.voltage_mv ?? null;
 
   function handleRefresh() {
-    api.curve().then(setCurve).catch(console.error);
+    api.curve(selectedGpuIndex).then(setCurve).catch(console.error);
   }
 
   useEffect(() => {
@@ -40,10 +40,10 @@ export default function App() {
     document.addEventListener("mousedown", handleClickOutside);
 
     // Fetch initial active profile
-    api.profiles().then(data => setActiveProfile(data.active)).catch(console.error);
+    api.profiles(selectedGpuIndex).then(data => setActiveProfile(data.active)).catch(console.error);
 
     return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, []);
+  }, [selectedGpuIndex, setActiveProfile]);
 
   // Worst connection status wins
   const wsStatus =
