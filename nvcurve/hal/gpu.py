@@ -35,10 +35,46 @@ def get_gpu_name(gpu) -> str:
 
 
 def discover_gpus() -> list[GpuInfo]:
-    """Initialize NvAPI and return a list of GpuInfo for all physical GPUs."""
+    """Initialize NvAPI and NVML, and return a list of GpuInfo for all physical GPUs."""
     init_nvapi()
     gpus, count = enumerate_gpus()
-    return [GpuInfo(name=get_gpu_name(gpus[i]), index=i) for i in range(count)]
+    infos = []
+
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+        has_nvml = True
+    except Exception:
+        has_nvml = False
+
+    for i in range(count):
+        name = get_gpu_name(gpus[i])
+        uuid = None
+        pci_bus_id = None
+        if has_nvml:
+            try:
+                handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+                uuid = pynvml.nvmlDeviceGetUUID(handle)
+                # NVML might return bytes
+                if isinstance(uuid, bytes):
+                    uuid = uuid.decode('utf-8', errors='ignore')
+                pci_info = pynvml.nvmlDeviceGetPciInfo(handle)
+                # Parse something like "00000000:01:00.0" -> bus is 1
+                if isinstance(pci_info.bus, bytes):
+                    pci_bus_id = int(pci_info.bus.decode('utf-8', errors='ignore'), 16)
+                else:
+                    pci_bus_id = pci_info.bus
+            except Exception:
+                pass
+        infos.append(GpuInfo(name=name, index=i, uuid=uuid, pci_bus_id=pci_bus_id))
+
+    if has_nvml:
+        try:
+            pynvml.nvmlShutdown()
+        except Exception:
+            pass
+
+    return infos
 
 
 def get_gpu(index: int = 0):

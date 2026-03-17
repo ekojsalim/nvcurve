@@ -63,6 +63,8 @@ class MonitoringSample:
 class GpuInfo:
     name: str
     index: int
+    uuid: str | None = None
+    pci_bus_id: int | None = None
 
 
 @dataclass

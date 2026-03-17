@@ -195,12 +195,18 @@ def read_curve(gpu, gpu_name: str = "") -> tuple[Optional[CurveState], str]:
 def build_write_buffer(
     gpu,
     point_deltas: dict[int, int],
+    full_mask: bool = False,
 ) -> tuple[Optional[ctypes.Array], str]:
     """Build a SetClockBoostTable buffer with specified per-point deltas.
 
     Strategy: read the current ClockBoostTable, modify only the targeted
     entries' freqDelta fields, set only the targeted mask bits (single-bit per
     write to avoid touching neighbouring points).
+
+    Args:
+        full_mask: if True, copy the complete GetClockBoostMask into the write
+                   buffer instead of the default sparse (per-point) mask.
+                   Older GPUs (e.g. Pascal) may require this.
 
     Returns (mutable_buffer, "OK") or (None, error).
     """
@@ -214,11 +220,18 @@ def build_write_buffer(
     # Rewrite version word explicitly
     struct.pack_into("<I", buf, 0, (1 << 16) | CT_SIZE)
 
-    # Clear mask — set only bits for points we're writing
-    for i in range(4, 4 + 32):
-        buf[i] = 0x00
-
-    set_mask_bits(buf, set(point_deltas.keys()))
+    if full_mask:
+        # Copy the complete boost mask — required by some older drivers/GPUs
+        mask, mask_err = get_boost_mask(gpu)
+        if not mask:
+            return None, f"Cannot read boost mask: {mask_err}"
+        for i, b in enumerate(mask):
+            buf[4 + i] = b
+    else:
+        # Sparse mask — set only bits for points we're writing
+        for i in range(4, 4 + 32):
+            buf[i] = 0x00
+        set_mask_bits(buf, set(point_deltas.keys()))
 
     for point, delta_khz in point_deltas.items():
         off = CT_BASE + point * CT_STRIDE + CT_DELTA_OFF
@@ -231,6 +244,7 @@ def write_offsets(
     gpu,
     point_deltas: dict[int, int],
     dry_run: bool = False,
+    full_mask: bool = False,
 ) -> tuple[int, str]:
     """Write per-point frequency offsets via SetClockBoostTable.
 
@@ -238,10 +252,11 @@ def write_offsets(
         gpu: NvAPI GPU handle
         point_deltas: {point_index: delta_kHz} — only these points are written
         dry_run: if True, build the buffer but don't call the driver
+        full_mask: if True, use the full GetClockBoostMask (for older GPUs)
 
     Returns (return_code, description).
     """
-    buf, err = build_write_buffer(gpu, point_deltas)
+    buf, err = build_write_buffer(gpu, point_deltas, full_mask=full_mask)
     if buf is None:
         return -999, err
 

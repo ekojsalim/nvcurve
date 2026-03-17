@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef } from 'react';
-import { Save, Trash2, Check, ChevronRight, Pencil } from 'lucide-react';
+import { Save, Trash2, Check, ChevronRight, Pencil, Star } from 'lucide-react';
 import { api } from '../../api/client';
 import type { ProfileData } from '../../types';
 import { toast } from 'sonner';
+import { useCurveStore } from '../../store/curveStore';
 
 interface ProfilePanelProps {
   activeProfile: string | null;
@@ -10,8 +11,10 @@ interface ProfilePanelProps {
 }
 
 export function ProfilePanel({ activeProfile, onProfileApplied }: ProfilePanelProps) {
+  const { selectedGpuIndex, gpuInfo } = useCurveStore();
   const [profiles, setProfiles] = useState<ProfileData[]>([]);
   const [loading, setLoading] = useState(true);
+  const [autoLoadProfile, setAutoLoadProfile] = useState<string | null>(null);
 
   // Save form
   const [isSaveOpen, setIsSaveOpen] = useState(false);
@@ -34,9 +37,10 @@ export function ProfilePanel({ activeProfile, onProfileApplied }: ProfilePanelPr
 
   async function fetchProfiles() {
     try {
-      const data = await api.profiles();
+      const data = await api.profiles(selectedGpuIndex);
       setProfiles(data.profiles);
       onProfileApplied(data.active);
+      setAutoLoadProfile(data.auto_load);
     } catch {
       toast.error('Failed to load profiles');
     } finally {
@@ -44,7 +48,18 @@ export function ProfilePanel({ activeProfile, onProfileApplied }: ProfilePanelPr
     }
   }
 
-  useEffect(() => { fetchProfiles(); }, []);
+  async function handleSetAutoLoad(name: string | null) {
+    try {
+      await api.setAutoLoadProfile(name, selectedGpuIndex);
+      setAutoLoadProfile(name);
+      if (name) toast.success(`"${name}" will load on server start`);
+      else toast.success('Auto-load cleared');
+    } catch (e: any) {
+      toast.error('Failed to update default profile: ' + (e.message || String(e)));
+    }
+  }
+
+  useEffect(() => { fetchProfiles(); }, [selectedGpuIndex]);
 
   useEffect(() => {
     if (isSaveOpen) saveInputRef.current?.focus();
@@ -60,7 +75,7 @@ export function ProfilePanel({ activeProfile, onProfileApplied }: ProfilePanelPr
     if (!newName.trim()) return;
     try {
       setIsSaving(true);
-      await api.saveProfile(newName.trim());
+      await api.saveProfile(newName.trim(), selectedGpuIndex);
       toast.success(`Profile "${newName.trim()}" saved`);
       setIsSaveOpen(false);
       await fetchProfiles();
@@ -74,7 +89,7 @@ export function ProfilePanel({ activeProfile, onProfileApplied }: ProfilePanelPr
   async function handleApply(name: string) {
     try {
       setApplyingName(name);
-      await api.applyProfile(name);
+      await api.applyProfile(name, selectedGpuIndex);
       onProfileApplied(name);
       toast.success(`"${name}" applied`);
     } catch (e: any) {
@@ -90,6 +105,7 @@ export function ProfilePanel({ activeProfile, onProfileApplied }: ProfilePanelPr
       await api.deleteProfile(name);
       toast.success(`"${name}" deleted`);
       if (activeProfile === name) onProfileApplied(null);
+      if (autoLoadProfile === name) setAutoLoadProfile(null);
       setDeletingName(null);
       await fetchProfiles();
     } catch (e: any) {
@@ -110,6 +126,7 @@ export function ProfilePanel({ activeProfile, onProfileApplied }: ProfilePanelPr
       await api.renameProfile(oldName, renameValue.trim());
       toast.success(`Renamed to "${renameValue.trim()}"`);
       if (activeProfile === oldName) onProfileApplied(renameValue.trim());
+      if (autoLoadProfile === oldName) setAutoLoadProfile(renameValue.trim());
       setRenamingName(null);
       await fetchProfiles();
     } catch (e: any) {
@@ -193,6 +210,7 @@ export function ProfilePanel({ activeProfile, onProfileApplied }: ProfilePanelPr
               ].filter(Boolean).join(' · ');
 
               const isActive = activeProfile === p.name;
+              const isAutoLoad = autoLoadProfile === p.name;
               const isApplying = applyingName === p.name;
               const isConfirmingDelete = deletingName === p.name;
               const isRenaming_ = renamingName === p.name;
@@ -255,9 +273,19 @@ export function ProfilePanel({ activeProfile, onProfileApplied }: ProfilePanelPr
                           : <span className="w-[13px] shrink-0" />
                         }
                         <div className="min-w-0">
-                          <p className={`text-sm font-medium truncate ${isActive ? 'text-zinc-100' : 'text-zinc-300'}`}>
-                            {p.name}
-                          </p>
+                          <div className="flex items-center gap-1.5">
+                            <p className={`text-sm font-medium truncate ${isActive ? 'text-zinc-100' : 'text-zinc-300'}`}>
+                              {p.name}
+                            </p>
+                            {isAutoLoad && (
+                              <Star size={11} className="text-sky-400 shrink-0" fill="currentColor" />
+                            )}
+                            {gpuInfo && p.gpu_name !== gpuInfo.name && (
+                              <span className="text-xs text-zinc-600 truncate shrink-0" title={`Saved from ${p.gpu_name}`}>
+                                {p.gpu_name}
+                              </span>
+                            )}
+                          </div>
                           {badges && <p className="text-xs text-zinc-500">{badges}</p>}
                         </div>
                       </div>
@@ -273,6 +301,13 @@ export function ProfilePanel({ activeProfile, onProfileApplied }: ProfilePanelPr
                             : <ChevronRight size={13} />
                           }
                           Apply
+                        </button>
+                        <button
+                          onClick={() => handleSetAutoLoad(isAutoLoad ? null : p.name)}
+                          className={`p-1.5 rounded transition hover:bg-zinc-700 ${isAutoLoad ? 'text-sky-400 hover:text-sky-300' : 'text-zinc-600 hover:text-sky-400'}`}
+                          title={isAutoLoad ? 'Clear default profile' : 'Set as default profile'}
+                        >
+                          <Star size={13} fill={isAutoLoad ? 'currentColor' : 'none'} />
                         </button>
                         <button
                           onClick={() => { setRenamingName(p.name); setRenameValue(p.name); }}

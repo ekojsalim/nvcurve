@@ -19,11 +19,13 @@ class ApiError(Exception):
 
 
 class NvCurveClient:
-    def __init__(self, base: str = DEFAULT_BASE):
+    def __init__(self, base: str = DEFAULT_BASE, gpu_index: int = 0):
         self._base = base.rstrip("/")
+        self.gpu_index = gpu_index
 
     def _url(self, path: str) -> str:
-        return f"{self._base}{path}"
+        sep = "&" if "?" in path else "?"
+        return f"{self._base}{path}{sep}gpu_index={self.gpu_index}"
 
     def _raise(self, r: httpx.Response) -> None:
         if r.is_error:
@@ -63,6 +65,9 @@ class NvCurveClient:
             return True
         except Exception:
             return False
+
+    def gpus(self) -> list:
+        return self._get("/api/gpus")
 
     # ── GPU ──────────────────────────────────────────────────────────────────
 
@@ -128,6 +133,14 @@ class NvCurveClient:
 
     def profile_delete(self, name: str) -> dict:
         return self._delete(f"/api/profiles/{name}")
+
+    # ── Config ───────────────────────────────────────────────────────────────
+
+    def config_get(self) -> dict:
+        return self._get("/api/config")
+
+    def config_update(self, auto_load_profile: str | None, gpu_index: int = 0) -> dict:
+        return self._post("/api/config", {"auto_load_profile": auto_load_profile, "gpu_index": gpu_index})
 
     # ── Server control ───────────────────────────────────────────────────────
 

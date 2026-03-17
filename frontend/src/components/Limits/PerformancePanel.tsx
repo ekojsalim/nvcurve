@@ -9,6 +9,7 @@ import { ConfirmDialog } from '../common/ConfirmDialog';
 type Pending = Pick<LimitsState, 'power_limit_w' | 'mem_offset_mhz'>;
 
 export function PerformancePanel() {
+  const { selectedGpuIndex } = useCurveStore();
   const [limits, setLimits] = useState<LimitsState | null>(null);
   const [pending, setPending] = useState<Partial<Pending>>({});
   const [loading, setLoading] = useState(true);
@@ -20,7 +21,7 @@ export function PerformancePanel() {
   async function fetchLimits() {
     try {
       setLoading(true);
-      setLimits(await api.limits());
+      setLimits(await api.limits(selectedGpuIndex));
     } catch {
       toast.error('Failed to load performance limits');
     } finally {
@@ -28,13 +29,13 @@ export function PerformancePanel() {
     }
   }
 
-  useEffect(() => { fetchLimits(); }, []);
+  useEffect(() => { fetchLimits(); }, [selectedGpuIndex]);
 
   async function handleApply() {
     setBusy(true);
     setError(null);
     try {
-      await api.updateLimits(pending);
+      await api.updateLimits(pending, selectedGpuIndex);
       useCurveStore.getState().setActiveProfile(null);
       setPending({});
       setConfirmApply(false);
@@ -52,7 +53,7 @@ export function PerformancePanel() {
     setBusy(true);
     setError(null);
     try {
-      await api.resetLimits();
+      await api.resetLimits(selectedGpuIndex);
       useCurveStore.getState().setActiveProfile(null);
       setPending({});
       setConfirmReset(false);

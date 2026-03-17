@@ -71,6 +71,7 @@ export function CurveEditor({ curve, activeDomain, onDomainChange, currentVoltag
   const {
     pendingDeltas,
     selectedPoints,
+    anchorPoint,
     stageEdit,
     stageMultiEdit,
     selectPoint,
@@ -802,6 +803,7 @@ export function CurveEditor({ curve, activeDomain, onDomainChange, currentVoltag
                 const isHovered = hoveredPoint?.index === p.index;
                 const isSelected = selectedPoints.has(p.index);
                 const isDragging = dragInfo?.pointIndex === p.index;
+                const isAnchor = isSelected && selectedPoints.size >= 2 && p.index === anchorPoint;
 
                 let fill = readOnly ? '#6366f1' : '#34d399';
                 if (!readOnly && hasPendingEdit && !isSelected) fill = '#22d3ee';
@@ -812,6 +814,12 @@ export function CurveEditor({ curve, activeDomain, onDomainChange, currentVoltag
 
                 return (
                   <g key={p.index}>
+                    {/* Anchor ring — amber outer halo marking the flatten reference point */}
+                    {isAnchor && (
+                      <circle cx={cx} cy={mainCy} r={r + 3.5}
+                        fill="none" stroke="#f59e0b" strokeWidth={1.5} strokeOpacity={0.85} />
+                    )}
+
                     {/* Dim ring at confirmed position (only visible when there's a pending edit) */}
                     {!readOnly && ghostCy !== null && Math.abs(ghostCy - mainCy) > 0.5 && (
                       <circle cx={cx} cy={ghostCy} r={3}

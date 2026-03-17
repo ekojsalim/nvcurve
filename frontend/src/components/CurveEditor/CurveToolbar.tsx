@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect } from 'react';
-import { ZoomIn, RotateCcw } from 'lucide-react';
+import { ZoomIn, RotateCcw, Minus } from 'lucide-react';
 import { useCurveStore } from '../../store/curveStore';
 import type { VFPoint } from '../../types';
 
@@ -19,7 +19,7 @@ interface Props {
 }
 
 export function CurveToolbar({ activePts, onResetZoom, isZoomed, readOnly, zoomFactor, onZoomChange }: Props) {
-  const { pendingDeltas, stageRangeEdit } = useCurveStore();
+  const { pendingDeltas, selectedPoints, anchorPoint, curve, stageRangeEdit, flattenToAnchor } = useCurveStore();
 
   const [offsetMhz, setOffsetMhz] = useState(0);
 
@@ -96,6 +96,28 @@ export function CurveToolbar({ activePts, onResetZoom, isZoomed, readOnly, zoomF
           </span>
         </div>
       )}
+
+      {/* Flatten — visible when 2+ points are selected */}
+      {!readOnly && selectedPoints.size >= 2 && (() => {
+        const anchor = anchorPoint !== null && selectedPoints.has(anchorPoint)
+          ? anchorPoint
+          : Math.min(...selectedPoints);
+        const anchorDelta =
+          pendingDeltas.get(anchor) ??
+          curve?.points.find(p => p.index === anchor)?.delta_khz ??
+          0;
+        const label = `·${anchor}  ${anchorDelta >= 0 ? '+' : ''}${anchorDelta / 1000} MHz`;
+        return (
+          <button
+            onClick={flattenToAnchor}
+            className="flex items-center gap-1.5 px-2 py-1 rounded text-xs font-medium text-amber-400 hover:text-amber-300 hover:bg-zinc-800 border border-zinc-700/40 transition"
+            title={`Flatten all selected points to anchor point ${anchor} (${anchorDelta >= 0 ? '+' : ''}${anchorDelta / 1000} MHz)`}
+          >
+            <Minus size={11} />
+            Flatten to {label}
+          </button>
+        );
+      })()}
 
       {/* Legend — right-aligned */}
       <div className="flex items-center gap-3 text-xs text-zinc-500 ml-auto">

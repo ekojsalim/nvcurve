@@ -9,7 +9,7 @@
 NVCurve brings MSI Afterburner-style per-point voltage-frequency curve control to Linux. It calls undocumented NvAPI functions directly via `libnvidia-api.so`, giving you precise frequency offsets control. A Python CLI handles scripting and headless use; a React web UI provides interactive curve editing, profile management, and live hardware monitoring.
 
 > [!WARNING]
-> **This tool is experimental.** Verified only on an **RTX 5090** with driver **580.126.18**. Compatibility with other GPUs and driver versions is unknown. The underlying NvAPI functions are undocumented and may change or disappear between driver releases.
+> **This tool is experimental.** It has been verified on a range of NVIDIA GPUs and recent drivers, but compatibility is not guaranteed across all hardware and driver versions. The underlying NvAPI functions are undocumented and may change or disappear between driver releases.
 >
 > Read operations are generally safe. Write operations alter GPU operational parameters. **Follow the first-time setup steps below before applying any changes**, and proceed with caution.
 
@@ -18,9 +18,11 @@ NVCurve brings MSI Afterburner-style per-point voltage-frequency curve control t
 ## Features
 
 - **Per-Point Curve Editing**: Independently adjust the frequency offset for any voltage point on the GPU's V/F curve.
+- **Curve Flattening**: Select multiple points and flatten them to a common frequency in one click using anchor-point targeting.
 - **Live Monitoring**: Tracks GPU voltage, clock speed, temperature, and power draw via NvAPI and NVML.
-- **Profile Management**: Save and load named clock configurations.
-- **Modern Web UI**: Interactive curve graph, point table, and real-time monitoring dashboard, all in the browser.
+- **Profile Management**: Save, apply, and set a default (auto-apply on startup) profile. Profile commands work with or without the server running.
+- **Multi-GPU Support** *(experimental)*: Manage multiple NVIDIA GPUs simultaneously from a single server instance; switch between GPUs in the web UI. Untested on real multi-GPU hardware — feedback welcome.
+- **Modern Web UI**: Interactive curve graph, point table, real-time monitoring dashboard, and GPU selector, all in the browser.
 
 ## Prerequisites
 
@@ -45,33 +47,19 @@ uv tool install nvcurve
 
 Before touching anything, confirm NvAPI is working correctly on your GPU and driver. **Do not skip this on an untested configuration.**
 
-Probe all required NvAPI functions:
-
 ```bash
-nvcurve read --diag
+nvcurve setup
 ```
 
-Every entry under `=== Function probe ===` should show `resolved`. If any critical function shows `NOT FOUND`, write operations will not work and the tool is unsupported on your system.
+This runs four checks in sequence:
+1. **NvAPI function probe** — verifies all required functions resolve in the driver
+2. **Curve read** — reads and displays your current V/F curve as a baseline
+3. **Write-verify** — writes `+5 MHz` to the last GPU-domain point, reads it back, and confirms the driver accepted it and no other points were unexpectedly modified
+4. **Restore** — automatically restores the snapshot from before the test write
 
-Read your current curve to establish a baseline:
+Only continue if `setup` reports **Compatible**.
 
-```bash
-nvcurve read
-```
-
-Run a write-and-verify cycle with a small, safe offset to confirm the write path works end-to-end:
-
-```bash
-nvcurve verify --point 80 --delta 5
-```
-
-This writes `+5 MHz` to point 80, reads it back, and confirms whether the driver accepted the change, including whether any other points were unexpectedly modified. Restore your baseline afterwards:
-
-```bash
-nvcurve snapshot restore
-```
-
-Only continue once `verify` reports success.
+> Override the test point or delta with `nvcurve setup --point N --delta 5`. Pass `--full-mask` if writes fail on older GPUs (Pascal and earlier).
 
 ### Step 2 — Launch the web UI
 
@@ -122,6 +110,10 @@ If you are running nvcurve as a systemd service, restart it afterwards to pick u
 ```bash
 nvcurve service restart
 ```
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for a complete history of changes.
 
 ## Web UI controls
 
@@ -196,11 +188,22 @@ nvcurve snapshot restore
 
 ### Profiles
 
+Profile commands work whether or not the server is running. Apply and default operations escalate to root automatically when bypassing the server.
+
 ```bash
-nvcurve profile save --name balanced
-nvcurve profile apply --name balanced
-nvcurve profile list
+nvcurve profile save balanced          # Save current curve as a profile
+nvcurve profile apply balanced         # Apply a saved profile
+nvcurve profile list                   # List profiles with active/default markers
+nvcurve profile default balanced       # Set profile to apply on server startup
+nvcurve profile default --clear        # Clear the startup default
+nvcurve --gpu 1 profile default perf   # Set default for a specific GPU (multi-GPU)
 ```
+
+> [!NOTE]
+> If you use LACT or similar tools and have a default profile set, disable the `lactd` service first — it applies its own curve on startup and will overwrite NVCurve's auto-applied profile:
+> ```bash
+> sudo systemctl disable --now lactd
+> ```
 
 ### Diagnostics
 
@@ -219,4 +222,4 @@ NVCurve has two components:
 
 ## Disclaimer
 
-This software is provided as-is. The NvAPI functions it relies on are undocumented, unsupported officially by NVIDIA, and may change or break without notice between driver versions. NVCurve has been verified on a single GPU (RTX 5090) and driver version (580.126.18); behaviour on other hardware is unknown. Write operations alter GPU state. The authors accept no responsibility for hardware damage, system instability, or data loss resulting from the use of this software.
+This software is provided as-is. The NvAPI functions it relies on are undocumented, unsupported officially by NVIDIA, and may change or break without notice between driver releases. NVCurve has been verified on a range of NVIDIA GPUs and recent drivers; behaviour on other hardware or driver versions is not guaranteed. Write operations alter GPU state. The authors accept no responsibility for hardware damage, system instability, or data loss resulting from the use of this software.

@@ -7,6 +7,8 @@ const HISTORY_SIZE = 120; // ~60s at 2Hz
 
 interface CurveStore {
   // Hardware state (from API)
+  availableGpus: GpuInfo[];
+  selectedGpuIndex: number;
   curve: CurveState | null;
   gpuInfo: GpuInfo | null;
   monitor: MonitoringSample | null;
@@ -18,8 +20,17 @@ interface CurveStore {
   /** point index → pending delta in kHz (overrides curve.points[i].delta_khz for display) */
   pendingDeltas: Map<number, number>;
   selectedPoints: Set<number>;
+  /**
+   * The anchor point for multi-point operations (e.g. flatten).
+   * Set to the last explicitly clicked point. Bulk selects (box, range, Ctrl+A)
+   * leave it unchanged; clearSelection resets it to null.
+   * If null or not in selectedPoints, operations fall back to the lowest selected index.
+   */
+  anchorPoint: number | null;
 
   // Hardware state setters
+  setAvailableGpus: (gpus: GpuInfo[]) => void;
+  setSelectedGpuIndex: (index: number) => void;
   setCurve: (c: CurveState) => void;
   setGpuInfo: (g: GpuInfo) => void;
   pushMonitor: (s: MonitoringSample) => void;
@@ -42,6 +53,12 @@ interface CurveStore {
   selectPoint: (index: number, multi?: boolean) => void;
   selectRange: (indices: number[]) => void;
   clearSelection: () => void;
+  /**
+   * Stage all selected points to the anchor point's current effective delta.
+   * Falls back to the lowest selected index if anchorPoint is null or deselected.
+   * No-op if fewer than 2 points are selected.
+   */
+  flattenToAnchor: () => void;
 
   // Derived helper — effective MHz for a point including any pending delta
   effectiveMhz: (point: VFPoint) => number;
@@ -50,6 +67,8 @@ interface CurveStore {
 }
 
 export const useCurveStore = create<CurveStore>()((set, get) => ({
+  availableGpus: [],
+  selectedGpuIndex: 0,
   curve: null,
   gpuInfo: null,
   monitor: null,
@@ -57,7 +76,12 @@ export const useCurveStore = create<CurveStore>()((set, get) => ({
   activeProfile: null,
   pendingDeltas: new Map(),
   selectedPoints: new Set(),
+  anchorPoint: null,
 
+  setAvailableGpus: (availableGpus) => set({ availableGpus }),
+  setSelectedGpuIndex: (selectedGpuIndex) => {
+    set({ selectedGpuIndex, curve: null, gpuInfo: null, monitor: null, monitorHistory: [], pendingDeltas: new Map(), selectedPoints: new Set(), anchorPoint: null });
+  },
   setCurve: (curve) => set({ curve }),
   setGpuInfo: (gpuInfo) => set({ gpuInfo }),
   setActiveProfile: (activeProfile) => set({ activeProfile }),
@@ -104,10 +128,10 @@ export const useCurveStore = create<CurveStore>()((set, get) => ({
     }),
 
   discardEdits: () =>
-    set({ pendingDeltas: new Map(), selectedPoints: new Set() }),
+    set({ pendingDeltas: new Map(), selectedPoints: new Set(), anchorPoint: null }),
 
   applyEdits: async (onSuccess) => {
-    const { pendingDeltas } = get();
+    const { pendingDeltas, selectedGpuIndex } = get();
     if (pendingDeltas.size === 0) return;
 
     // Convert Map to plain record for the API
@@ -115,7 +139,7 @@ export const useCurveStore = create<CurveStore>()((set, get) => ({
     pendingDeltas.forEach((v, k) => { deltas[k] = v; });
 
     try {
-      const result = await api.writeDeltas(deltas);
+      const result = await api.writeDeltas(deltas, selectedGpuIndex);
       set({ pendingDeltas: new Map(), selectedPoints: new Set(), activeProfile: null });
       if (result?.freq_warnings?.length) {
         toast.warning('Curve applied — driver clamped some points to 0 MHz (negative freq delta)');
@@ -129,8 +153,9 @@ export const useCurveStore = create<CurveStore>()((set, get) => ({
   },
 
   resetAllDeltas: async (onSuccess) => {
+    const { selectedGpuIndex } = get();
     try {
-      await api.resetCurve();
+      await api.resetCurve(selectedGpuIndex);
       set({ pendingDeltas: new Map(), selectedPoints: new Set(), activeProfile: null });
       toast.success('Curve reset to hardware defaults');
       onSuccess();
@@ -142,25 +167,60 @@ export const useCurveStore = create<CurveStore>()((set, get) => ({
   selectPoint: (index, multi = false) =>
     set((s) => {
       const next = new Set(s.selectedPoints);
+      let anchor = s.anchorPoint;
       if (multi) {
-        if (next.has(index)) next.delete(index);
-        else next.add(index);
+        if (next.has(index)) {
+          next.delete(index);
+          if (anchor === index) anchor = next.size > 0 ? [...next].at(-1)! : null;
+        } else {
+          next.add(index);
+          anchor = index; // last explicitly added point is the new anchor
+        }
       } else {
         if (next.size === 1 && next.has(index)) {
-          next.clear(); // clicking the only selected point deselects
+          next.clear();
+          anchor = null;
         } else {
           next.clear();
           next.add(index);
+          anchor = index;
         }
       }
-      return { selectedPoints: next };
+      return { selectedPoints: next, anchorPoint: anchor };
     }),
 
   selectRange: (indices) =>
-    set({ selectedPoints: new Set(indices) }),
+    // Bulk selects don't change the anchor — preserve it if still in the new selection.
+    set((s) => {
+      const next = new Set(indices);
+      const anchor = s.anchorPoint !== null && next.has(s.anchorPoint) ? s.anchorPoint : null;
+      return { selectedPoints: next, anchorPoint: anchor };
+    }),
 
   clearSelection: () =>
-    set({ selectedPoints: new Set() }),
+    set({ selectedPoints: new Set(), anchorPoint: null }),
+
+  flattenToAnchor: () => {
+    const { selectedPoints, anchorPoint, pendingDeltas, curve, stageMultiEdit } = get();
+    if (selectedPoints.size < 2 || !curve) return;
+
+    const anchor = anchorPoint !== null && selectedPoints.has(anchorPoint)
+      ? anchorPoint
+      : Math.min(...selectedPoints);
+
+    const anchorPt = curve.points.find(p => p.index === anchor);
+    if (!anchorPt) return;
+    const anchorPendingDelta = pendingDeltas.get(anchor) ?? anchorPt.delta_khz;
+    const anchorEffectiveKhz = anchorPt.freq_khz + anchorPendingDelta;
+
+    const edits = new Map<number, number>();
+    for (const idx of selectedPoints) {
+      const pt = curve.points.find(p => p.index === idx);
+      if (!pt) continue;
+      edits.set(idx, anchorEffectiveKhz - pt.freq_khz);
+    }
+    stageMultiEdit(edits);
+  },
 
   effectiveMhz: (point) => {
     const { pendingDeltas } = get();

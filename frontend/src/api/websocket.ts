@@ -9,6 +9,7 @@ export function createWsConnection<T>(
   path: string,
   onMessage: MessageHandler<T>,
   onStatus: StatusHandler,
+  gpuIndex: number = 0,
 ): WsHandle {
   let ws: WebSocket | null = null;
   let delay = 1000;
@@ -25,6 +26,7 @@ export function createWsConnection<T>(
     ws.onopen = () => {
       delay = 1000;
       onStatus('connected');
+      ws?.send(JSON.stringify({ action: 'subscribe', gpu_index: gpuIndex }));
     };
 
     ws.onmessage = (e) => {

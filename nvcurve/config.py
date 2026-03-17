@@ -21,6 +21,11 @@ class Config:
     snapshot_dir: str = "/var/cache/nvcurve/snapshots"
     profile_dir: str = "/etc/nvcurve/profiles"
 
+    # Per-GPU default profiles: applied automatically on server startup.
+    # Key = stable GPU identifier (UUID string, "pci:{bus_id}", or "idx:{n}" fallback).
+    # Value = profile name (str).
+    auto_load_profiles: dict[str, str] = field(default_factory=dict)
+
 
 # Module-level default config instance.
 default_config = Config()
