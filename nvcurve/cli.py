@@ -18,6 +18,7 @@ Daemon (systemd service for auto-load profiles):
     nvcurve daemon                                 Run the daemon (requires root)
     nvcurve autoload                               Apply auto-load profiles from config (requires root)
     nvcurve service install [--serve]              Register systemd daemon (escalates to root)
+    nvcurve service configure                      Update config + restart daemon (escalates to root)
     nvcurve service uninstall                      Remove systemd service (escalates to root)
     nvcurve service start/stop/restart/status      Manage systemd service
 
@@ -1391,6 +1392,60 @@ def cmd_service(args):
             print()
             print("Register with:  nvcurve service install")
 
+        # Show persistent config regardless of install state.
+        pcfg: dict = {}
+        try:
+            with open(_PERSISTENT_CONFIG_FILE) as f:
+                pcfg = json.load(f)
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            print(f"  (could not read config: {e})", file=sys.stderr)
+
+        auto_serve = pcfg.get("auto_serve", False)
+        host = pcfg.get("host", "127.0.0.1")
+        port = pcfg.get("port", 8042)
+        print()
+        print(f"web server auto-start: {'on' if auto_serve else 'off'}")
+        print(f"web server address:    {host}:{port}")
+        print()
+        print("Change with:  nvcurve service configure [--auto-serve|--no-auto-serve] [--host H] [--port P]")
+
+    elif action == "configure":
+        require_root()
+        import subprocess
+
+        os.makedirs("/etc/nvcurve", exist_ok=True)
+        pcfg: dict = {}
+        try:
+            with open(_PERSISTENT_CONFIG_FILE) as f:
+                pcfg = json.load(f)
+        except Exception:
+            pass
+
+        if hasattr(args, "auto_serve") and args.auto_serve is not None:
+            pcfg["auto_serve"] = args.auto_serve
+        if hasattr(args, "host") and args.host is not None:
+            pcfg["host"] = args.host
+        if hasattr(args, "port") and args.port is not None:
+            pcfg["port"] = args.port
+
+        with open(_PERSISTENT_CONFIG_FILE, "w") as f:
+            json.dump(pcfg, f, indent=2)
+        print(f"Config updated ({_PERSISTENT_CONFIG_FILE}):")
+        print(f"  auto-serve: {'on' if pcfg.get('auto_serve', False) else 'off'}")
+        print(f"  host:       {pcfg.get('host', '127.0.0.1')}")
+        print(f"  port:       {pcfg.get('port', 8042)}")
+
+        if os.path.exists(unit_path):
+            try:
+                subprocess.run(["systemctl", "restart", "nvcurve"], check=True)
+                print("Daemon restarted — new config is active.")
+            except subprocess.CalledProcessError as e:
+                print(f"systemctl restart failed: {e}", file=sys.stderr)
+        else:
+            print("(Service not installed — config will take effect on next install.)")
+
 
 # ── Server management ─────────────────────────────────────────────────────────
 
@@ -1613,6 +1668,19 @@ Examples:
                            help="Default web server bind address (stored in config)")
     p_install.add_argument("--port", type=int, default=8042,
                            help="Default web server port (stored in config)")
+
+    p_configure = s_svc.add_parser("configure",
+                                    help="Update config and restart daemon (escalates to root)")
+    p_configure.add_argument("--auto-serve", dest="auto_serve",
+                             action="store_true", default=None,
+                             help="Auto-start web server on boot")
+    p_configure.add_argument("--no-auto-serve", dest="auto_serve",
+                             action="store_false",
+                             help="Do not auto-start web server on boot")
+    p_configure.add_argument("--host", default=None,
+                             help="Web server bind address")
+    p_configure.add_argument("--port", type=int, default=None,
+                             help="Web server port")
 
     s_svc.add_parser("uninstall",
                      help="Remove systemd service (escalates to root)")

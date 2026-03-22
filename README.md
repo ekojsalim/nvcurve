@@ -83,10 +83,17 @@ nvcurve serve stop
 
 ### Step 3 — (Optional) Install as a systemd service
 
-If you want the server to start automatically on boot, register it as a systemd service:
+Register the nvcurve daemon as a systemd service so it starts automatically on boot:
 
 ```bash
 nvcurve service install
+```
+
+The daemon handles auto-loading GPU profiles on boot. The web server is separate and starts on demand (`nvcurve serve start`). To also have the web server start automatically on boot, pass `--auto-serve`:
+
+```bash
+nvcurve service install --auto-serve
+# optionally: --host 0.0.0.0 --port 8042
 ```
 
 This enables and starts the service immediately. Manage it with:
@@ -95,8 +102,16 @@ This enables and starts the service immediately. Manage it with:
 nvcurve service start
 nvcurve service stop
 nvcurve service restart
-nvcurve service status
+nvcurve service status        # shows daemon state + web server config
 nvcurve service uninstall
+```
+
+To change the web server auto-start setting or address after install, use `service configure` — it updates the config and restarts the daemon in one step:
+
+```bash
+sudo nvcurve service configure --auto-serve
+sudo nvcurve service configure --no-auto-serve
+sudo nvcurve service configure --host 0.0.0.0 --port 8042
 ```
 
 ## Upgrading
