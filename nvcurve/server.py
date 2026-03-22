@@ -214,7 +214,11 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             log.error("Failed to initialize GPU %d: %s", idx, exc)
 
-    # Auto-load per-GPU default profiles
+    # ── Backward Compatibility Bridge ──────────────────────────────────────────
+    # NOTE: This auto-load path is for users running the server directly (e.g.
+    # via an old systemd unit file that lacks the new daemon mode).
+    # In the future, this will be removed and auto-loading will be the
+    # responsibility of daemon.py only.
     cfg: Config = _state["config"]
     if cfg.auto_load_profiles:
         # Build a reverse map: stable_key → current gpu_index
@@ -226,7 +230,8 @@ async def lifespan(app: FastAPI):
             if gpu_idx is None:
                 log.warning("Auto-load: no GPU found with key %r — skipping", gpu_key)
                 continue
-            log.info("Auto-loading profile %r on GPU %d (%s)", profile_name, gpu_idx, gpu_key)
+            log.info("Auto-loading profile %r on GPU %d (%s) [compat path]",
+                     profile_name, gpu_idx, gpu_key)
             try:
                 await _auto_apply_profile_with_retry(profile_name, gpu_idx)
             except FileNotFoundError:
@@ -235,6 +240,7 @@ async def lifespan(app: FastAPI):
             except Exception as exc:
                 log.warning("Auto-load profile %r failed on GPU %d: %s — skipping",
                             profile_name, gpu_idx, exc)
+    # ──────────────────────────────────────────────────────────────────────────
 
     yield  # server is running
 
@@ -251,7 +257,7 @@ async def lifespan(app: FastAPI):
 
 # ── App ───────────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="nvcurve", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="nvcurve", version="0.5.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

@@ -1,22 +1,25 @@
 """nvcurve CLI
 
-Normal use (no root required):
-    nvcurve                                        Launch web UI
-    nvcurve read [--full|--json]                   Read V/F curve
+Normal use:
+    nvcurve                                        Launch web UI (escalates to root if needed)
+    nvcurve read [--full|--json]                   Read V/F curve (escalates to root)
     nvcurve write [--point N|--range A-B|--global|--reset] --delta D [--dry-run]
-    nvcurve verify --point N --delta D             Write-verify cycle
-    nvcurve snapshot [save|restore|list]           Manage snapshots (server-optional)
+    nvcurve verify --point N --delta D             Write-verify cycle (requires root)
+    nvcurve snapshot [save|restore|list]           Manage snapshots
     nvcurve gpus                                   List detected NVIDIA GPUs
-    nvcurve profile [save|apply|list|default]      Manage profiles (server-optional)
-    nvcurve serve start [--detach]                 Start server (escalates to root)
-    nvcurve serve stop                             Stop running server
-    nvcurve serve status                           Check server status
-    nvcurve service install                        Register systemd service (escalates to root)
+    nvcurve profile [save|apply|list|default]      Manage profiles
+
+Web server (on-demand, for the GUI):
+    nvcurve serve start [--detach]                 Start web server (escalates to root)
+    nvcurve serve stop                             Stop running web server
+    nvcurve serve status                           Check web server status
+
+Daemon (systemd service for auto-load profiles):
+    nvcurve daemon                                 Run the daemon (requires root)
+    nvcurve autoload                               Apply auto-load profiles from config (requires root)
+    nvcurve service install [--serve]              Register systemd daemon (escalates to root)
     nvcurve service uninstall                      Remove systemd service (escalates to root)
-    nvcurve service start                          Start systemd service (escalates to root)
-    nvcurve service stop                           Stop systemd service (escalates to root)
-    nvcurve service restart                        Restart systemd service (escalates to root)
-    nvcurve service status                         Check systemd service status
+    nvcurve service start/stop/restart/status      Manage systemd service
 
 First-time / diagnostic commands (bypass server, escalate to root):
     nvcurve setup                                  Hardware compatibility check (diag + verify + restore)
@@ -224,7 +227,7 @@ def output_json(gpu_name, points, offsets, voltage, domains=None):
 
 # ── Diagnostics (direct HAL, root required) ───────────────────────────────────
 
-def run_diagnostics(gpu, gpu_name):
+def run_diagnostics(gpu, gpu_name, gpu_index: int = 0):
     """Probe all known NvAPI functions and report results."""
     from .hal.vfcurve import get_boost_mask
     from .hal.monitoring import init_nvml, get_driver_version, get_vram_total
@@ -238,7 +241,7 @@ def run_diagnostics(gpu, gpu_name):
     print("=== System ===")
     print()
     driver = get_driver_version()
-    vram = get_vram_total(0)
+    vram = get_vram_total(gpu_index)
     print(f"  GPU:     {gpu_name}")
     print(f"  Driver:  {driver or '(unavailable — NVML not initialised)'}")
     if vram is not None:
@@ -311,8 +314,8 @@ def run_diagnostics(gpu, gpu_name):
     print()
     print("=== Clock offsets & ranges ===")
     print()
-    offsets = get_clock_offsets(0)
-    mem_range = get_mem_offset_range(0)
+    offsets = get_clock_offsets(gpu_index)
+    mem_range = get_mem_offset_range(gpu_index)
     gpc_cur = offsets.get("gpc_offset_mhz")
     mem_cur = offsets.get("mem_offset_mhz")
     mem_min = mem_range.get("min_mem_offset_mhz")
@@ -328,7 +331,7 @@ def run_diagnostics(gpu, gpu_name):
     print()
     print("=== Power limits ===")
     print()
-    pwr = get_power_limit(0)
+    pwr = get_power_limit(gpu_index)
     cur_w  = pwr.get("power_limit_w")
     def_w  = pwr.get("default_power_limit_w")
     min_w  = pwr.get("min_power_limit_w")
@@ -360,22 +363,6 @@ def _open_browser_as_user(url: str) -> None:
     webbrowser.open(url)
 
 
-def _server_not_running(base_url: str = "http://127.0.0.1:8042") -> None:
-    """Print a helpful error and exit when the server is not reachable."""
-    unit_path = "/etc/systemd/system/nvcurve.service"
-    print(f"nvcurve: server not reachable at {base_url}", file=sys.stderr)
-    print(file=sys.stderr)
-    if os.path.exists(unit_path):
-        print("Start it with:", file=sys.stderr)
-        print("  sudo systemctl start nvcurve", file=sys.stderr)
-    else:
-        print("Start it with:", file=sys.stderr)
-        print("  nvcurve serve start --detach", file=sys.stderr)
-        print(file=sys.stderr)
-        print("Or register as a persistent systemd service:", file=sys.stderr)
-        print("  nvcurve service install", file=sys.stderr)
-    sys.exit(1)
-
 
 def require_root():
     """Ensure the process is running as root, re-invoking via sudo if necessary."""
@@ -401,8 +388,31 @@ def require_root():
 
 _SERVER_INFO_FILE = "/run/nvcurve.json"       # runtime: written by server, deleted on exit
 _PERSISTENT_CONFIG_FILE = "/etc/nvcurve/config.json"  # persistent: written by service install
+_DAEMON_SOCKET_PATH = "/run/nvcurve-daemon.sock"
 
 _ALLOWED_HOSTS = {"127.0.0.1", "::1", "localhost"}
+
+
+def _daemon_send(cmd: dict) -> dict | None:
+    """Send a JSON command to the daemon and return its response.
+
+    Returns None if the daemon socket is not available (daemon not running).
+    """
+    import socket as _socket
+    try:
+        with _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM) as sock:
+            sock.settimeout(5.0)
+            sock.connect(_DAEMON_SOCKET_PATH)
+            sock.sendall(json.dumps(cmd).encode() + b"\n")
+            buf = b""
+            while not buf.endswith(b"\n"):
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+            return json.loads(buf)
+    except (FileNotFoundError, ConnectionRefusedError, OSError):
+        return None
 
 
 def _safe_host(host: str, cfg: Config) -> str:
@@ -478,13 +488,13 @@ def _show_curve(gpu_name, points, offsets, voltage, args, domains=None) -> None:
     print_curve(points, offsets, voltage, domains=domains, full=args.full)
 
 
-def cmd_read(args, client: NvCurveClient):
+def cmd_read(args):
     # ── Direct HAL paths (need root) ──────────────────────────────────────────
     if args.diag:
         require_root()
         from .hal.gpu import get_gpu
         gpu, gpu_name = get_gpu(index=getattr(args, "gpu_index", 0))
-        run_diagnostics(gpu, gpu_name)
+        run_diagnostics(gpu, gpu_name, gpu_index=getattr(args, "gpu_index", 0))
         return
 
     if args.raw:
@@ -532,36 +542,20 @@ def cmd_read(args, client: NvCurveClient):
             _show_curve(gpu_name, points, offsets, voltage, args, domains=domains)
         return
 
-    # ── Normal path — via server, with direct-HAL fallback ────────────────────
-    try:
-        curve_data = client.curve()
-        voltage = client.voltage()
-    except ServerNotRunning:
-        # Server not running: escalate and read hardware directly.
-        # require_root() either re-execs (if not root, doesn't return here) or
-        # is a no-op (if already root); direct HAL runs in the root process.
-        print("(server not running — reading hardware directly)", file=sys.stderr)
-        require_root()
-        from .hal.gpu import get_gpu
-        from .hal.vfcurve import read_curve
-        from .hal.monitoring import read_voltage as _read_voltage
-        gpu, gpu_name = get_gpu(index=getattr(args, "gpu_index", 0))
-        curve_state, curve_err = read_curve(gpu, gpu_name)
-        if not curve_state:
-            print(f"Failed to read V/F curve: {curve_err}")
-            return
-        voltage, _ = _read_voltage(gpu)
-        points = [(p.freq_khz, p.volt_uv) for p in curve_state.points]
-        offsets = [p.delta_khz for p in curve_state.points]
-        domains = [p.domain for p in curve_state.points]
-        _show_curve(gpu_name, points, offsets, voltage, args, domains=domains)
+    # ── Normal path — direct HAL (requires root) ──────────────────────────────
+    require_root()
+    from .hal.gpu import get_gpu
+    from .hal.vfcurve import read_curve
+    from .hal.monitoring import read_voltage as _read_voltage
+    gpu, gpu_name = get_gpu(index=getattr(args, "gpu_index", 0))
+    curve_state, curve_err = read_curve(gpu, gpu_name)
+    if not curve_state:
+        print(f"Failed to read V/F curve: {curve_err}")
         return
-
-    gpu_name = curve_data["gpu_name"]
-    pts = curve_data["points"]
-    points = [(p["freq_khz"], p["volt_uv"]) for p in pts]
-    offsets = [p["delta_khz"] for p in pts]
-    domains = [p["domain"] for p in pts]
+    voltage, _ = _read_voltage(gpu)
+    points = [(p.freq_khz, p.volt_uv) for p in curve_state.points]
+    offsets = [p.delta_khz for p in curve_state.points]
+    domains = [p.domain for p in curve_state.points]
     _show_curve(gpu_name, points, offsets, voltage, args, domains=domains)
 
 
@@ -642,7 +636,7 @@ def cmd_inspect(args):
         print()
 
 
-def cmd_write(args, client: NvCurveClient):
+def cmd_write(args):
     delta_khz = int(args.delta * 1000)
     max_delta_khz = int(args.max_delta * 1000) if args.max_delta is not None else None
     point_deltas = {}
@@ -651,16 +645,12 @@ def cmd_write(args, client: NvCurveClient):
         if args.dry_run:
             print("DRY RUN — would reset all offsets to 0.")
             return
-        try:
-            result = client.reset_curve()
-        except ServerNotRunning:
-            _server_not_running(client._base)
-            return
-        except ApiError as e:
-            print(f"Reset failed: {e.detail}")
-            return
+        require_root()
+        from .hal.gpu import get_gpu
+        from .hal.vfcurve import reset_offsets
+        gpu, _ = get_gpu(index=getattr(args, "gpu_index", 0))
+        reset_offsets(gpu)
         print("Reset: all offsets set to 0.")
-        _print_write_warnings(result)
         return
 
     elif args.point is not None:
@@ -684,10 +674,10 @@ def cmd_write(args, client: NvCurveClient):
         return
 
     if args.dry_run:
-        if args.glob or args.reset:
+        if args.glob:
             print()
             print("DRY RUN — would send:")
-            print(f"  Target: {'Reset' if args.reset else 'Global active points'}")
+            print(f"  Target: Global active points")
             print(f"  Delta:  {delta_khz:+d} kHz ({args.delta:+.0f} MHz)")
         else:
             keys = sorted(point_deltas.keys())
@@ -701,36 +691,52 @@ def cmd_write(args, client: NvCurveClient):
             print(f"  Max delta override: {args.max_delta:+.0f} MHz")
         return
 
-    try:
-        if args.glob:
-            result = client.write_global(delta_khz, max_delta_khz=max_delta_khz)
-        else:
-            result = client.write_curve(
-                point_deltas,
+    require_root()
+    from .hal.gpu import get_gpu
+    from .hal.vfcurve import write_offsets, read_curve
+    from .safety import validate_write, check_negative_freq_warnings
 
-                max_delta_khz=max_delta_khz,
-            )
-    except ServerNotRunning:
-        _server_not_running(client._base)
-        return
-    except ApiError as e:
-        print(f"Write failed: {e.detail}")
-        return
+    gpu_index = getattr(args, "gpu_index", 0)
+    gpu, gpu_name = get_gpu(index=gpu_index)
+
+    if args.glob:
+        # Build per-point deltas for all active GPU-domain points (mirrors server behaviour)
+        curve_state, curve_err = read_curve(gpu, gpu_name)
+        if not curve_state:
+            print(f"Failed to read curve: {curve_err}", file=sys.stderr)
+            sys.exit(1)
+        point_deltas = {p.index: delta_khz for p in curve_state.points if p.domain == "gpu"}
+
+    effective_max = max_delta_khz if max_delta_khz is not None else default_config.max_delta_khz
+    errors = validate_write(point_deltas, effective_max)
+    if errors:
+        for e in errors:
+            print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if default_config.auto_snapshot:
+        from .hal.snapshot import save as snapshot_save
+        snapshot_save(gpu, gpu_name, default_config.snapshot_dir, default_config.max_snapshots)
+
+    ret, desc = write_offsets(gpu, point_deltas)
+    if ret != 0:
+        print(f"Write failed ({ret}): {desc}", file=sys.stderr)
+        sys.exit(1)
 
     print(f"Write OK — {len(point_deltas)} point(s) updated.")
-    _print_write_warnings(result)
+
+    try:
+        if not args.glob:
+            curve_state, _ = read_curve(gpu, gpu_name)
+        if curve_state:
+            vfp_freqs = [p.freq_khz for p in curve_state.points]
+            for w in check_negative_freq_warnings(point_deltas, vfp_freqs, []):
+                print(f"WARNING: {w}")
+    except Exception:
+        pass
 
 
-def _print_write_warnings(result: dict) -> None:
-    if result.get("warning"):
-        w = result["warning"]
-        msg = w.get("message", w) if isinstance(w, dict) else w
-        print(f"\nWARNING: {msg}")
-    for w in result.get("freq_warnings", []):
-        print(f"WARNING: {w}")
-
-
-def cmd_verify(args, client: NvCurveClient):
+def cmd_verify(args):
     """Write-verify-read cycle — runs directly against hardware (requires root)."""
     require_root()
 
@@ -825,58 +831,36 @@ def cmd_verify(args, client: NvCurveClient):
     print("  nvcurve snapshot restore")
 
 
-def cmd_snapshot(args, client: NvCurveClient):
+def cmd_snapshot(args):
     if args.action == "save":
-        try:
-            result = client.snapshot_save()
-        except ServerNotRunning:
-            print("(server not running — saving snapshot directly)", file=sys.stderr)
-            require_root()
-            from .hal.gpu import get_gpu
-            from .hal.snapshot import save as _snapshot_save
-            gpu, gpu_name = get_gpu(index=getattr(args, "gpu_index", 0))
-            path = _snapshot_save(gpu, gpu_name, default_config.snapshot_dir, default_config.max_snapshots)
-            if path is None:
-                print("Failed to save snapshot.", file=sys.stderr)
-                sys.exit(1)
-            print(f"Snapshot saved: {path}")
-            return
-        except ApiError as e:
-            print(f"Snapshot save failed: {e.detail}")
-            return
-        print(f"Snapshot saved: {result.get('filepath', '?')}")
+        require_root()
+        from .hal.gpu import get_gpu
+        from .hal.snapshot import save as _snapshot_save
+        gpu, gpu_name = get_gpu(index=getattr(args, "gpu_index", 0))
+        path = _snapshot_save(gpu, gpu_name, default_config.snapshot_dir, default_config.max_snapshots)
+        if path is None:
+            print("Failed to save snapshot.", file=sys.stderr)
+            sys.exit(1)
+        print(f"Snapshot saved: {path}")
 
     elif args.action == "restore":
-        try:
-            client.snapshot_restore(filepath=args.file)
-        except ServerNotRunning:
-            print("(server not running — restoring snapshot directly)", file=sys.stderr)
-            require_root()
-            from .hal.gpu import get_gpu
-            from .hal.snapshot import restore as _snapshot_restore
-            gpu, _ = get_gpu(index=getattr(args, "gpu_index", 0))
-            ok = _snapshot_restore(gpu, default_config.snapshot_dir, args.file)
-            if not ok:
-                print("Restore failed — no snapshot found.", file=sys.stderr)
-                sys.exit(1)
-            print("Snapshot restored.")
-            return
-        except ApiError as e:
-            print(f"Restore failed: {e.detail}")
-            return
+        require_root()
+        from .hal.gpu import get_gpu
+        from .hal.snapshot import restore as _snapshot_restore
+        gpu, _ = get_gpu(index=getattr(args, "gpu_index", 0))
+        ok = _snapshot_restore(gpu, default_config.snapshot_dir, args.file)
+        if not ok:
+            print("Restore failed — no snapshot found.", file=sys.stderr)
+            sys.exit(1)
         print("Snapshot restored.")
 
     elif args.action == "list":
-        try:
-            snapshots = client.snapshots()
-        except ServerNotRunning:
-            from .hal.snapshot import list_snapshots as _list_snapshots
-            raw = _list_snapshots(default_config.snapshot_dir)
-            snapshots = [
-                {"filepath": s.filepath, "timestamp": s.timestamp,
-                 "gpu": s.gpu, "nonzero_offsets": s.nonzero_offsets}
-                for s in raw
-            ]
+        from .hal.snapshot import list_snapshots as _list_snapshots
+        snapshots = [
+            {"filepath": s.filepath, "timestamp": s.timestamp,
+             "gpu": s.gpu, "nonzero_offsets": s.nonzero_offsets}
+            for s in _list_snapshots(default_config.snapshot_dir)
+        ]
         if not snapshots:
             print("No snapshots found.")
             return
@@ -956,42 +940,33 @@ def _profile_config_set_default(gpu_index: int, name: str | None) -> None:
         _json.dump(data, f, indent=2)
 
 
-def cmd_profile(args, client: NvCurveClient):
+def cmd_profile(args):
     if args.action == "list":
+        import glob as _glob, json as _json, os as _os
         gpu_index = getattr(args, "gpu_index", 0)
-        try:
-            data = client.profiles()
-            profiles = data.get("profiles", [])
-            active = data.get("active")
-            auto_load = data.get("auto_load")
-        except ServerNotRunning:
-            # Fall back: scan profile dir directly
-            import glob as _glob, json as _json, os as _os
-            profile_dir = default_config.profile_dir
-            cfg_data = _profile_config_read()
-            raw_defaults = cfg_data.get("auto_load_profiles", {})
-            if not raw_defaults and "auto_load_profile" in cfg_data:
-                raw_defaults = {"idx:0": cfg_data["auto_load_profile"]}
-            gpu_key = _gpu_stable_key_offline(gpu_index)
-            auto_load = raw_defaults.get(gpu_key) if gpu_key is not None else None
-            active = None
-            raw = sorted(_glob.glob(_os.path.join(profile_dir, "*.json")))
-            profiles = []
-            for path in raw:
-                try:
-                    with open(path) as f:
-                        p = _json.load(f)
-                    name = _os.path.splitext(_os.path.basename(path))[0]
-                    profiles.append({"name": name, "curve_deltas": p.get("curve_deltas", {})})
-                except Exception:
-                    pass
+        profile_dir = default_config.profile_dir
+        cfg_data = _profile_config_read()
+        raw_defaults = cfg_data.get("auto_load_profiles", {})
+        if not raw_defaults and "auto_load_profile" in cfg_data:
+            raw_defaults = {"idx:0": cfg_data["auto_load_profile"]}
+        gpu_key = _gpu_stable_key_offline(gpu_index)
+        auto_load = raw_defaults.get(gpu_key) if gpu_key is not None else None
+        raw = sorted(_glob.glob(_os.path.join(profile_dir, "*.json")))
+        profiles = []
+        for path in raw:
+            try:
+                with open(path) as f:
+                    p = _json.load(f)
+                name = _os.path.splitext(_os.path.basename(path))[0]
+                profiles.append({"name": name, "curve_deltas": p.get("curve_deltas", {})})
+            except Exception:
+                pass
         if not profiles:
             print("No profiles found.")
             return
         print("Profiles:")
         for p in profiles:
             markers = []
-            if p["name"] == active: markers.append("active")
             if p["name"] == auto_load: markers.append("default")
             marker_str = f"  [{', '.join(markers)}]" if markers else ""
             pts = len(p["curve_deltas"])
@@ -1003,58 +978,62 @@ def cmd_profile(args, client: NvCurveClient):
         if not clearing and not args.name:
             print("Error: profile name required (or use --clear)")
             return
+        require_root()
         try:
-            if clearing:
-                client.config_update(None, gpu_index)
-                print(f"Auto-load profile cleared for GPU {gpu_index}.")
-            else:
-                client.config_update(args.name, gpu_index)
-                print(f"Auto-load profile set to '{args.name}' for GPU {gpu_index}.")
-        except ServerNotRunning:
-            require_root()  # re-execs via sudo if not root; no-op if already root
-            print("(server not running — writing config directly)", file=sys.stderr)
-            try:
-                _profile_config_set_default(gpu_index, None if clearing else args.name)
-            except ValueError as e:
-                print(f"Error: {e}", file=sys.stderr)
-                return
-            if clearing:
-                print(f"Auto-load profile cleared for GPU {gpu_index}.")
-            else:
-                print(f"Auto-load profile set to '{args.name}' for GPU {gpu_index}.")
+            _profile_config_set_default(gpu_index, None if clearing else args.name)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return
+        if clearing:
+            print(f"Auto-load profile cleared for GPU {gpu_index}.")
+        else:
+            print(f"Auto-load profile set to '{args.name}' for GPU {gpu_index}.")
 
     elif args.action == "save":
         if not args.name:
             print("Error: profile name required for save")
             return
+        require_root()
+        import os as _os
+        from .hal.gpu import get_gpu
+        from .hal.vfcurve import read_curve
+        from .hal.limits import get_clock_offsets, get_power_limit
+        from .profiles.native import ProfileData, save_profile
+
+        gpu_index = getattr(args, "gpu_index", 0)
+        gpu, gpu_name = get_gpu(index=gpu_index)
+
+        curve_state, curve_err = read_curve(gpu, gpu_name)
+        if not curve_state:
+            print(f"Failed to read curve: {curve_err}", file=sys.stderr)
+            sys.exit(1)
+
+        curve_deltas = {str(p.index): p.delta_khz for p in curve_state.points if p.delta_khz != 0}
+
         try:
-            result = client.profile_save(args.name)
-        except ServerNotRunning:
-            _server_not_running(client._base)
-            return
-        except ApiError as e:
-            print(f"Save failed: {e.detail}")
-            return
-        print(f"Saved profile '{args.name}' to {result.get('filepath', '?')}")
+            power_info = get_power_limit(gpu_index)
+            offsets = get_clock_offsets(gpu_index)
+            power_limit_w = power_info.get("power_limit_w")
+            mem_offset_mhz = offsets.get("mem_offset_mhz")
+        except Exception:
+            power_limit_w = None
+            mem_offset_mhz = None
+
+        data = ProfileData(
+            name=args.name,
+            gpu_name=gpu_name,
+            curve_deltas=curve_deltas,
+            mem_offset_mhz=mem_offset_mhz,
+            power_limit_w=power_limit_w,
+        )
+        filepath = save_profile(default_config.profile_dir, data)
+        print(f"Saved profile '{args.name}' to {filepath}")
 
     elif args.action == "apply":
         if not args.name:
             print("Error: profile name required for apply")
             return
-        try:
-            client.profile_apply(args.name)
-        except ServerNotRunning:
-            pass
-        except ApiError as e:
-            print(f"Apply failed: {e.detail}")
-            return
-        else:
-            print(f"Applied profile '{args.name}'.")
-            return
-
-        # Server not running — apply directly
-        require_root()  # re-execs via sudo if not root; no-op if already root
-        print("(server not running — applying profile directly)", file=sys.stderr)
+        require_root()
         import os as _os
         from .hal.gpu import get_gpu
         from .hal.limits import set_clock_offsets, set_power_limit
@@ -1104,16 +1083,13 @@ def cmd_profile(args, client: NvCurveClient):
         print(f"Applied profile '{args.name}'.")
 
 
-def cmd_gpus(args, client: NvCurveClient):
+def cmd_gpus(args):
     """List all detected NVIDIA GPUs with index, name, UUID, and PCI bus ID."""
-    try:
-        gpus = client.gpus()
-    except ServerNotRunning:
-        from .hal.gpu import discover_gpus
-        gpus = [
-            {"index": i.index, "name": i.name, "uuid": i.uuid, "pci_bus_id": i.pci_bus_id}
-            for i in discover_gpus()
-        ]
+    from .hal.gpu import discover_gpus
+    gpus = [
+        {"index": i.index, "name": i.name, "uuid": i.uuid, "pci_bus_id": i.pci_bus_id}
+        for i in discover_gpus()
+    ]
     if not gpus:
         print("No NVIDIA GPUs detected.")
         return
@@ -1149,7 +1125,7 @@ def cmd_setup(args):
     # ── Step 1: NvAPI diagnostics ──────────────────────────────────────────────
     print("Step 1/4  NvAPI function probe")
     print()
-    run_diagnostics(gpu, gpu_name)
+    run_diagnostics(gpu, gpu_name, gpu_index=getattr(args, "gpu_index", 0))
     print()
 
     # ── Step 2: read current curve ─────────────────────────────────────────────
@@ -1270,16 +1246,11 @@ def cmd_service(args):
         require_root()
         import subprocess
 
-        exec_cmd = f"{sys.executable} -m nvcurve"
-
-        host = getattr(args, "host", "127.0.0.1")
-        port = getattr(args, "port", 8042)
-
-        exec_start = f"{exec_cmd} serve start --host {host} --port {port}"
+        exec_start = f"{sys.executable} -m nvcurve daemon"
 
         unit = (
             "[Unit]\n"
-            "Description=NVCurve NVIDIA GPU V/F Curve Server\n"
+            "Description=NVCurve NVIDIA GPU V/F Curve Daemon\n"
             "After=nvidia-persistenced.service\n"
             "Wants=nvidia-persistenced.service\n"
             "\n"
@@ -1298,8 +1269,7 @@ def cmd_service(args):
             f.write(unit)
         print(f"Unit file written to {unit_path}")
 
-        # Write persistent config so clients can discover host:port without the
-        # runtime info file (e.g. before the service has started, after reboot).
+        # Write persistent config.
         os.makedirs("/etc/nvcurve", exist_ok=True)
         persistent_cfg: dict = {}
         try:
@@ -1307,10 +1277,17 @@ def cmd_service(args):
                 persistent_cfg = json.load(f)
         except Exception:
             pass
-        persistent_cfg.update({"host": host, "port": port})
+        host = getattr(args, "host", "127.0.0.1")
+        port = getattr(args, "port", 8042)
+        auto_serve = getattr(args, "auto_serve", False)
+        persistent_cfg.update({"host": host, "port": port, "auto_serve": auto_serve})
         with open(_PERSISTENT_CONFIG_FILE, "w") as f:
-            json.dump(persistent_cfg, f)
+            json.dump(persistent_cfg, f, indent=2)
         print(f"Persistent config written to {_PERSISTENT_CONFIG_FILE}")
+        if auto_serve:
+            print(f"  Web server will auto-start on boot at {host}:{port}")
+        else:
+            print(f"  Web server default: {host}:{port}  (start on demand: nvcurve serve start)")
 
         try:
             subprocess.run(["systemctl", "daemon-reload"], check=True)
@@ -1418,29 +1395,39 @@ def cmd_service(args):
 # ── Server management ─────────────────────────────────────────────────────────
 
 def _cmd_serve_start(args, cfg: Config, open_browser: bool = False) -> None:
-    """Start the server. Requires root — calls require_root() internally."""
-    require_root()
-
+    """Start the web server — via daemon if available, otherwise directly (requires root)."""
     host = getattr(args, "host", cfg.host)
     port = getattr(args, "port", cfg.port)
 
-    # Warn if a systemd-managed server is already active — running a second
-    # instance alongside it will cause port conflicts or split-brain state.
-    unit_path = "/etc/systemd/system/nvcurve.service"
-    if os.path.exists(unit_path):
-        import subprocess
-        result = subprocess.run(
-            ["systemctl", "is-active", "nvcurve"],
-            capture_output=True, text=True,
-        )
-        if result.stdout.strip() == "active":
-            print("Warning: the nvcurve systemd service is already active.",
-                  file=sys.stderr)
-            print("  Starting a second instance may cause port conflicts.",
-                  file=sys.stderr)
-            print("  Manage it with:  systemctl stop nvcurve  /  nvcurve service status",
-                  file=sys.stderr)
-            print(file=sys.stderr)
+    # --direct: skip daemon round-trip (used when the daemon itself spawns us).
+    if getattr(args, "direct", False):
+        require_root()
+        with open(_SERVER_INFO_FILE, "w") as f:
+            json.dump({"pid": os.getpid(), "host": host, "port": port}, f)
+        try:
+            from .server import run as server_run
+            server_run(host=host, port=port,
+                       gpu_index=getattr(args, "gpu_index", 0),
+                       config=cfg, open_browser=False)
+        finally:
+            if os.path.exists(_SERVER_INFO_FILE):
+                os.remove(_SERVER_INFO_FILE)
+        return
+
+    # Prefer daemon socket: no root required, daemon manages the server process.
+    resp = _daemon_send({"cmd": "serve_start", "host": host, "port": port})
+    if resp is not None:
+        if resp.get("ok"):
+            print(f"Web server starting (PID {resp['pid']}) at http://{host}:{port}")
+            if open_browser:
+                time.sleep(1.5)
+                _open_browser_as_user(f"http://{host}:{port}")
+        else:
+            print(f"Daemon: {resp.get('error')}", file=sys.stderr)
+        return
+
+    # Daemon not running — fall back to direct start (requires root).
+    require_root()
 
     info = _read_server_info()
     if info:
@@ -1452,24 +1439,18 @@ def _cmd_serve_start(args, cfg: Config, open_browser: bool = False) -> None:
 
     if getattr(args, "detach", False):
         import subprocess
-        # Already root (require_root() ran above) — spawn child without sudo.
-        # Child inherits root UID, skips require_root() itself, runs foreground.
         cmd = [sys.executable, "-m", "nvcurve", "serve", "start",
                "--host", host, "--port", str(port)]
         if getattr(args, "gpu_index", 0):
             cmd += ["--gpu", str(args.gpu_index)]
-
         log_path = _log_file()
         print("Starting nvcurve server in background...")
         with open(log_path, "a") as lf:
             p = subprocess.Popen(cmd, stdout=lf, stderr=lf, start_new_session=True)
         print(f"Server starting (PID {p.pid}). Logs: {log_path}")
-
         if open_browser:
-            # Give the server a moment to write its info file and start accepting.
             time.sleep(1.5)
-            url = _discover_server_url(cfg)
-            _open_browser_as_user(url)
+            _open_browser_as_user(_discover_server_url(cfg))
         return
 
     # Foreground mode — write info file so clients can discover host:port.
@@ -1514,11 +1495,11 @@ Examples:
   %(prog)s verify --point 80 --delta 15  Write + verify cycle
   %(prog)s snapshot save/restore/list    Manage snapshots
   %(prog)s profile save balanced         Save current state as profile
-  %(prog)s profile apply balanced        Apply saved profile (escalates if no server)
-  %(prog)s profile default balanced      Set profile to apply on server start
-  %(prog)s serve start --detach          Start server in background
-  %(prog)s serve stop                    Stop running server
-  %(prog)s service install               Register as systemd service (recommended)
+  %(prog)s profile apply balanced        Apply saved profile (escalates to root)
+  %(prog)s profile default balanced      Set profile to auto-load on daemon start
+  %(prog)s serve start --detach          Start web server in background
+  %(prog)s serve stop                    Stop running web server
+  %(prog)s service install               Register daemon as systemd service (recommended)
   %(prog)s read --diag                   Probe all NvAPI functions (needs root)
   %(prog)s inspect --point 80            Raw buffer fields for a point (needs root)
 """,
@@ -1597,8 +1578,14 @@ Examples:
     p_prof.add_argument("name", nargs="?", help="Profile name (for save/apply/default)")
     p_prof.add_argument("--clear", action="store_true", help="Clear the default profile (for default action)")
 
+    # daemon
+    sub.add_parser("daemon", help="Run the nvcurve daemon (apply auto-load profiles, requires root)")
+
+    # autoload
+    sub.add_parser("autoload", help="Apply auto-load profiles from config (requires root)")
+
     # serve
-    p_srv = sub.add_parser("serve", help="Start or manage the server directly")
+    p_srv = sub.add_parser("serve", help="Start or manage the web server")
     s_srv = p_srv.add_subparsers(dest="action")
 
     p_start = s_srv.add_parser("start", help="Start the server (escalates to root)")
@@ -1608,6 +1595,8 @@ Examples:
                          help="Port (default 8042)")
     p_start.add_argument("--detach", "-d", action="store_true",
                          help="Run in background")
+    p_start.add_argument("--direct", action="store_true",
+                         help=argparse.SUPPRESS)  # internal: skip daemon check
 
     s_srv.add_parser("stop", help="Stop the running server")
     s_srv.add_parser("status", help="Check server status")
@@ -1618,10 +1607,12 @@ Examples:
 
     p_install = s_svc.add_parser("install",
                                   help="Register as systemd service (escalates to root)")
+    p_install.add_argument("--auto-serve", action="store_true", dest="auto_serve",
+                           help="Auto-start web server on boot (default: off)")
     p_install.add_argument("--host", default="127.0.0.1",
-                           help="Server bind address")
+                           help="Default web server bind address (stored in config)")
     p_install.add_argument("--port", type=int, default=8042,
-                           help="Server port")
+                           help="Default web server port (stored in config)")
 
     s_svc.add_parser("uninstall",
                      help="Remove systemd service (escalates to root)")
@@ -1637,8 +1628,20 @@ Examples:
 
 
 def main():
+    import sys
+    base_parser = argparse.ArgumentParser(add_help=False)
+    base_parser.add_argument("--server", default=None)
+    base_parser.add_argument("--gpu", type=int, default=0, dest="gpu_index")
+    
+    known_args, remaining_argv = base_parser.parse_known_args(sys.argv[1:])
+    
     parser = build_parser()
-    args = parser.parse_args()
+    args = parser.parse_args(remaining_argv)
+    
+    if known_args.server is not None:
+        args.server = known_args.server
+    if known_args.gpu_index != 0:
+        args.gpu_index = known_args.gpu_index
 
     cfg = Config()
     try:
@@ -1658,13 +1661,25 @@ def main():
 
     # Default — no subcommand: open the web UI.
     # If the server is already running, just open a browser tab (no root needed).
-    # Otherwise start the server (require_root is called inside _cmd_serve_start).
+    # Otherwise start it. If we started it via the daemon (non-blocking), we
+    # block here and stop the server when the user hits Ctrl+C.
     if args.command is None:
         if client.ping():
-            print(f"Server is running at {base_url}")
             _open_browser_as_user(base_url)
-        else:
-            _cmd_serve_start(args, cfg, open_browser=True)
+            return
+
+        via_daemon = _daemon_send({"cmd": "ping"}) is not None
+        _cmd_serve_start(args, cfg, open_browser=True)
+
+        if via_daemon:
+            print("Press Ctrl+C to stop.")
+            try:
+                while True:
+                    time.sleep(1)
+            except KeyboardInterrupt:
+                print()
+            finally:
+                _daemon_send({"cmd": "serve_stop"})
         return
 
     if args.command == "serve":
@@ -1674,12 +1689,20 @@ def main():
             _cmd_serve_start(args, cfg, open_browser=False)
 
         elif action == "stop":
+            # Try daemon socket first.
+            resp = _daemon_send({"cmd": "serve_stop"})
+            if resp is not None:
+                if resp.get("ok"):
+                    print("Web server stopped.")
+                else:
+                    print(f"Daemon: {resp.get('error')}", file=sys.stderr)
+                return
+            # Fallback: send shutdown via HTTP API.
             try:
                 client.shutdown()
                 print("Server stopped.")
             except ServerNotRunning:
                 print("Server is not running.")
-                # Clean up stale info file if the process is gone
                 if os.path.exists(_SERVER_INFO_FILE):
                     try:
                         os.remove(_SERVER_INFO_FILE)
@@ -1689,6 +1712,16 @@ def main():
                 print(f"Shutdown failed: {e.detail}", file=sys.stderr)
 
         elif action == "status":
+            # Try daemon socket first.
+            resp = _daemon_send({"cmd": "serve_status"})
+            if resp is not None:
+                if resp.get("running"):
+                    pid = resp.get("pid")
+                    print(f"Daemon: web server running (PID {pid}) at {base_url}")
+                else:
+                    print(f"Daemon: web server not running")
+                return
+            # Fallback: check HTTP directly.
             if client.ping():
                 try:
                     info = client.gpu()
@@ -1703,21 +1736,31 @@ def main():
                 print(f"Server is NOT running at {base_url}")
         return
 
+    if args.command == "daemon":
+        from .daemon import run as daemon_run
+        daemon_run()
+        return
+
+    if args.command == "autoload":
+        from .profiles.apply import run_autoload
+        run_autoload()
+        return
+
     if args.command == "setup":
         cmd_setup(args)
     elif args.command == "read":
-        cmd_read(args, client)
+        cmd_read(args)
     elif args.command == "inspect":
         cmd_inspect(args)
     elif args.command == "write":
-        cmd_write(args, client)
+        cmd_write(args)
     elif args.command == "verify":
-        cmd_verify(args, client)
+        cmd_verify(args)
     elif args.command == "snapshot":
-        cmd_snapshot(args, client)
+        cmd_snapshot(args)
     elif args.command == "gpus":
-        cmd_gpus(args, client)
+        cmd_gpus(args)
     elif args.command == "profile":
-        cmd_profile(args, client)
+        cmd_profile(args)
     elif args.command == "service":
         cmd_service(args)

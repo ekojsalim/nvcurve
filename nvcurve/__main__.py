@@ -1,5 +1,10 @@
 """Allow running as: python -m nvcurve"""
 
-from .cli import main
+import sys
 
-main()
+if len(sys.argv) > 1 and sys.argv[1] == "daemon":
+    from .daemon import run
+    run()
+else:
+    from .cli import main
+    main()
