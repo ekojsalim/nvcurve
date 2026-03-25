@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.0] - 2026-03-23
+
+### Changed
+- **CLI Architecture Simplification**: The CLI has been decoupled from the FastAPI server and now operates as a stateless direct-HAL hardware administration tool. It no longer relies on the server for data reading or offset writing.
+- **Consistent Privileges**: All CLI commands that interact with the hardware now explicitly require root privileges.
+- **Background Daemon**: Added a new lightweight Unix socket daemon (`nvcurve daemon`) to handle auto-loading profiles on boot and managing the server's lifecycle.
+- **Global Arguments**: Fixed global argument parsing in the CLI to allow global flags (like `--gpu`) to be placed after subcommands.
+
 ## [0.4.0] - 2026-03-17
 
 ### Added
